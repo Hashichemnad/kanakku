@@ -33,7 +33,9 @@ jobs:
         working-directory: android
         env:
           KANAKKU_KS_PASS: ${{ secrets.KANAKKU_KS_PASS }}
-        run: gradle assembleRelease --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon 2>&1 | tee ../build.log
 
       - name: Rename APK
         run: |
@@ -53,3 +55,12 @@ jobs:
             --title "Kanakku 1.0.${{ github.run_number }}" \
             --notes "Install the APK on your phone. Updates keep your data." \
             --latest
+
+      - name: Publish build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "error:|warning: \[|e: |FAILURE|What went wrong|Could not|> " build.log | head -200 > build-errors.txt || true
+          tail -150 build.log >> build-errors.txt
+          gh release create "buildlog-${{ github.run_number }}" build-errors.txt --prerelease --title "Build log ${{ github.run_number }}" --notes "Failed build log"
