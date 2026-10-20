@@ -1,19 +1,22 @@
 import {
-  store, emptyData, newId, acc, catOf, personOf, kuriOf, assetOf, TYPES, rate, toAED, tAED, side,
-  accountBalances, peopleBalances, personAED, personLedger, kuriSummary, assetSummary, netWorth, monthTotals,
+  store, emptyData, newId, acc, catOf, personOf, kuriOf, assetOf, projectOf, TYPES, rate, toAED, side,
+  accountBalances, peopleBalances, personAED, personLedger, kuriSummary, assetSummary, netWorth, periodTotals,
+  projectSummary, kuriTotals, CURS, zero, addTo, isZero, multi,
   money, todayISO, fmtDate, fmtMonth, evalAmount, addMonths, dueRecurring, addDays, effectOn, MONTH_NAMES,
 } from './store.js';
 import { icon } from './icons.js';
+import { zakatView, yearState, lockYear, unlockYear, ensureZakatCat, zakatCats, paymentYear } from './zakat.js';
 
 // ======================================================================
 // UI state
 // ======================================================================
 const ui = {
+  zakatYear: null,
   tab: 'home',
   stack: [],            // detail pages: {v, id}
   sheets: [],           // open sheets (top = last)
   hide: false,          // hide amounts
-  act: { q: '', type: 'all', month: '', acc: '', cat: '', person: '', limit: 150 },
+  act: { q: '', type: 'all', month: '', acc: '', cat: '', person: '', project: '', limit: 150 },
   people: { filter: 'owed', q: '' },
   report: { mode: 'month', ym: todayISO().slice(0, 7), y: todayISO().slice(0, 4) },
   wealth: {},
@@ -53,6 +56,7 @@ function describe(t, ctx = {}) {
       out.title = t.sub || c?.name || TYPES[t.type].label;
       if (t.sub && c) out.sub.push(c.name);
       if (t.person) out.sub.push(personOf(t.person)?.name);
+      if (t.project && !ctx.inProject && projectOf(t.project)?.name !== c?.name) out.sub.push((projectOf(t.project)?.icon || '') + ' ' + (projectOf(t.project)?.name || ''));
       out.bg = t.type === 'income' ? 'bg-in' : '';
       break;
     case 'transfer': {
@@ -108,9 +112,9 @@ function groupedTxns(list, ctx = {}) {
   let html = '', day = null, buf = [];
   const flush = () => {
     if (!buf.length) return;
-    let net = 0;
-    for (const t of buf) if (t.type === 'expense') net -= tAED(t); else if (t.type === 'income') net += tAED(t);
-    html += `<div class="day-head"><span>${fmtDate(day)}</span><span class="num">${net ? money(net, 'AED', { plus: true }) : ''}</span></div><div class="list">${buf.map(t => txnRow(t, ctx)).join('')}</div>`;
+    const net = zero();
+    for (const t of buf) if (t.type === 'expense') net[t.cur] -= t.amt; else if (t.type === 'income') net[t.cur] += t.amt;
+    html += `<div class="day-head"><span>${fmtDate(day)}</span><span class="num">${isZero(net) ? '' : multi(net, { plus: true })}</span></div><div class="list">${buf.map(t => txnRow(t, ctx)).join('')}</div>`;
     buf = [];
   };
   for (const t of list) { if (t.date !== day) { flush(); day = t.date; } buf.push(t); }
@@ -135,37 +139,53 @@ function viewHome() {
   const nw = netWorth();
   const ym = todayISO().slice(0, 7);
   const prevYm = addMonths(ym + '-01', -1, 1).slice(0, 7);
-  const cur = monthTotals(ym), prev = monthTotals(prevYm);
+  const cur = periodTotals(ym), prev = periodTotals(prevYm);
   const bal = accountBalances();
-  const accs = D().accounts.filter(a => !a.closed).sort((x, y) => Math.abs(toAED(bal[y.id], y.cur)) - Math.abs(toAED(bal[x.id], x.cur)));
+  const accs = D().accounts.filter(a => !a.closed).sort((x, y) => (x.cur === y.cur ? 0 : x.cur === 'AED' ? -1 : 1) || Math.abs(bal[y.id]) - Math.abs(bal[x.id]));
   const due = dueRecurring();
   const recent = sorted(D().txns).slice(0, 6);
-  const cats = [...cur.byCat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const cats = [...cur.AED.byCat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
   const maxCat = cats[0]?.[1] || 1;
-  const diff = prev.spent ? Math.round((cur.spent - prev.spent) / prev.spent * 100) : null;
-  const hello = new Date().getHours() < 12 ? 'Good morning' : new Date().getHours() < 17 ? 'Good afternoon' : 'Good evening';
+  const diff = prev.AED.spent ? Math.round((cur.AED.spent - prev.AED.spent) / prev.AED.spent * 100) : null;
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const pick = (k) => ({ AED: nw.AED[k], INR: nw.INR[k] });
+  const owedPeople = [...peopleBalances().values()].filter(e => (e.AED || 0) > 0.5 || (e.INR || 0) > 0.5).length;
+  const mon = MONTH_NAMES[+ym.slice(5) - 1];
+  const zy = String(+ym.slice(0, 4) - (+ym.slice(5) < 12 ? 1 : 0));
+  const zv = zakatView(zy);
+  const zakatLeft = !isZero(zv.left) && (zv.left.AED > 0.5 || zv.left.INR > 0.5);
 
   return `<div class="screen">
   ${topbar('Kanakku', { sub: hello, right: `<button class="icon-btn" data-a="go" data-v="reports">${icon('pie')}</button><button class="icon-btn" data-a="go" data-v="settings">${icon('settings')}</button>` })}
   <div class="hero ${ui.hide ? 'blur' : ''}">
     <div class="label">Net worth <button class="eye" data-a="toggleHide" style="color:inherit">${icon(ui.hide ? 'eyeoff' : 'eye')}</button></div>
-    <div class="value num">${money(nw.total, 'AED', { short: false })}</div>
+    <div class="value num">${money(nw.AED.total, 'AED')}</div>
+    ${Math.abs(nw.INR.total) >= 0.005 ? `<div class="value2 num">${money(nw.INR.total, 'INR')}</div>` : ''}
     <div class="split">
-      <div><span>Bank & cash</span><b class="num">${money(nw.cash + nw.cards, 'AED', { short: true })}</b></div>
-      <div><span>Owed to you</span><b class="num">${money(nw.owed - nw.owe, 'AED', { short: true })}</b></div>
-      <div><span>Investments</span><b class="num">${money(nw.assets + nw.kuri, 'AED', { short: true })}</b></div>
+      <div><span>Bank & cash</span><b>${dual({ AED: nw.AED.cash + nw.AED.cards, INR: nw.INR.cash + nw.INR.cards }, { short: true })}</b></div>
+      <div><span>Owed to you</span><b>${dual({ AED: nw.AED.owed - nw.AED.owe, INR: nw.INR.owed - nw.INR.owe }, { short: true })}</b></div>
+      <div><span>Investments</span><b>${dual(pick('assets'), { short: true })}</b></div>
     </div>
+  </div>
+  <div class="shortcuts">
+    <button data-a="go" data-v="zakat"><span class="sc bg-in">🤲</span>Zakat</button>
+    <button data-a="go" data-v="kuris"><span class="sc bg-kuri">🪙</span>Kuri</button>
+    <button data-a="go" data-v="projects"><span class="sc bg-invest">🏗️</span>Projects</button>
+    <button data-a="go" data-v="recurring"><span class="sc bg-lend">🔁</span>Recurring</button>
+    <button data-a="go" data-v="reports"><span class="sc bg-move">${icon('pie')}</span>Reports</button>
   </div>
   ${due.map(r => {
     const late = r.next < todayISO();
     return `<div class="due"><div class="ic" style="font-size:22px">🔁</div><div class="mid"><b>${esc(r.title)}</b><span class="small muted">${late ? 'Was due' : 'Due'} ${fmtDate(r.next)} · ${money(r.amt, acc(r.acc)?.cur || 'AED')}</span></div>
       <button class="btn ghost" data-a="skipRec" data-id="${r.id}">Skip</button><button class="btn primary" style="flex:none" data-a="doRec" data-id="${r.id}">Record</button></div>`;
   }).join('')}
+  ${zakatLeft ? `<button class="due" style="width:100%;text-align:left" data-a="go" data-v="zakat" data-id="${zy}"><div class="ic" style="font-size:22px">🤲</div><div class="mid"><b>Zakat ${zy} still to give</b><span class="small muted num">${multi({ AED: Math.max(0, zv.left.AED), INR: Math.max(0, zv.left.INR) })}</span></div>${icon('chevron', 'chev')}</button>` : ''}
   <div class="section tiles">
-    <button class="tile" data-a="goAct" data-type="expense" data-month="${ym}"><div class="k"><span class="dot" style="background:var(--out)"></span>Spent in ${MONTH_NAMES[+ym.slice(5) - 1]}</div><div class="v num">${money(cur.spent)}</div><div class="s">${diff == null ? '&nbsp;' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}% vs last month`}</div></button>
-    <button class="tile" data-a="goAct" data-type="income" data-month="${ym}"><div class="k"><span class="dot" style="background:var(--in)"></span>Earned in ${MONTH_NAMES[+ym.slice(5) - 1]}</div><div class="v num">${money(cur.earned)}</div><div class="s">Saved ${money(cur.earned - cur.spent)}</div></button>
-    <button class="tile" data-a="tab" data-tab="people"><div class="k"><span class="dot" style="background:var(--lend)"></span>Owed to you</div><div class="v num">${money(nw.owed)}</div><div class="s">${[...peopleBalances().values()].filter(e => personAED(e) > 0.5).length} people</div></button>
-    <button class="tile" data-a="tab" data-tab="people" data-filter="owe"><div class="k"><span class="dot" style="background:var(--borrow)"></span>You owe</div><div class="v num">${money(nw.owe)}</div><div class="s">&nbsp;</div></button>
+    <button class="tile" data-a="goAct" data-type="expense" data-month="${ym}"><div class="k"><span class="dot" style="background:var(--out)"></span>Spent in ${mon}</div><div class="v num">${money(cur.AED.spent)}</div><div class="s">${cur.INR.spent ? money(cur.INR.spent, 'INR') + ' · ' : ''}${diff == null ? '' : `${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}%`}</div></button>
+    <button class="tile" data-a="goAct" data-type="income" data-month="${ym}"><div class="k"><span class="dot" style="background:var(--in)"></span>Earned in ${mon}</div><div class="v num">${money(cur.AED.earned)}</div><div class="s">${cur.INR.earned ? money(cur.INR.earned, 'INR') + ' · ' : ''}Saved ${money(cur.AED.earned - cur.AED.spent)}</div></button>
+    <button class="tile" data-a="tab" data-tab="people"><div class="k"><span class="dot" style="background:var(--lend)"></span>Owed to you</div><div class="v num">${money(nw.AED.owed)}</div><div class="s">${nw.INR.owed ? money(nw.INR.owed, 'INR') + ' · ' : ''}${owedPeople} people</div></button>
+    <button class="tile" data-a="tab" data-tab="people" data-filter="owe"><div class="k"><span class="dot" style="background:var(--borrow)"></span>You owe</div><div class="v num">${money(nw.AED.owe)}</div><div class="s">${nw.INR.owe ? money(nw.INR.owe, 'INR') : '&nbsp;'}</div></button>
   </div>
   <div class="section">
     <div class="section-head"><h2>Accounts</h2><button data-a="go" data-v="accounts">See all</button></div>
@@ -177,7 +197,7 @@ function viewHome() {
     </div>
   </div>
   ${cats.length ? `<div class="section">
-    <div class="section-head"><h2>Where it went · ${MONTH_NAMES[+ym.slice(5) - 1]}</h2><button data-a="go" data-v="reports">Reports</button></div>
+    <div class="section-head"><h2>Where it went · ${mon}</h2><button data-a="go" data-v="reports">Reports</button></div>
     <div class="card">${cats.map(([cid, v]) => { const c = catOf(cid); return `<button class="legend-row" style="width:100%;text-align:left" data-a="goAct" data-cat="${cid}" data-month="${ym}" data-type="expense">
       <span style="font-size:20px">${c?.icon || '🏷️'}</span><div class="grow"><div class="flex"><b class="grow">${esc(c?.name || 'Other')}</b><b class="num">${money(v)}</b></div><div class="bar"><i style="width:${Math.max(3, v / maxCat * 100)}%"></i></div></div></button>`; }).join('')}</div>
   </div>` : ''}
@@ -198,6 +218,7 @@ function filteredTxns() {
     if (f.acc && t.acc !== f.acc && t.to !== f.acc) return false;
     if (f.cat && t.cat !== f.cat) return false;
     if (f.person && t.person !== f.person) return false;
+    if (f.project && t.project !== f.project) return false;
     if (q) {
       const hay = [t.note, t.sub, catOf(t.cat)?.name, personOf(t.person)?.name, acc(t.acc)?.name, acc(t.to)?.name, kuriOf(t.kuri)?.name, assetOf(t.asset)?.name, String(t.amt)].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
@@ -209,14 +230,15 @@ function filteredTxns() {
 function viewActivity() {
   const f = ui.act;
   const list = filteredTxns();
-  let inn = 0, out = 0;
-  for (const t of list) { if (t.type === 'income') inn += tAED(t); if (t.type === 'expense') out += tAED(t); }
+  const inn = zero(), out = zero();
+  for (const t of list) { if (t.type === 'income') inn[t.cur] += t.amt; if (t.type === 'expense') out[t.cur] += t.amt; }
   const types = [['all', 'All'], ['expense', 'Expenses'], ['income', 'Income'], ['transfer', 'Transfers'], ['loans', 'Loans'], ['kuri', 'Kuri'], ['invest', 'Investments']];
   const active = [
     f.month && `<button class="chip on" data-a="clearF" data-k="month">${fmtMonth(f.month)} ✕</button>`,
     f.acc && `<button class="chip on" data-a="clearF" data-k="acc">${esc(acc(f.acc)?.name)} ✕</button>`,
     f.cat && `<button class="chip on" data-a="clearF" data-k="cat">${esc(catOf(f.cat)?.name)} ✕</button>`,
     f.person && `<button class="chip on" data-a="clearF" data-k="person">${esc(personOf(f.person)?.name)} ✕</button>`,
+    f.project && `<button class="chip on" data-a="clearF" data-k="project">${esc(projectOf(f.project)?.name)} ✕</button>`,
   ].filter(Boolean).join('');
   return `<div class="screen">
     ${topbar('Activity', { right: `<button class="icon-btn" data-a="filterSheet">${icon('sliders')}</button>` })}
@@ -225,8 +247,8 @@ function viewActivity() {
     <div class="chips">${types.map(([k, l]) => `<button class="chip ${f.type === k ? 'on' : ''}" data-a="actType" data-k="${k}">${l}</button>`).join('')}</div>
     ${active ? `<div class="chips">${active}</div>` : ''}
     <div class="tiles" style="margin-top:8px">
-      <div class="tile"><div class="k">Money out</div><div class="v num c-out">${money(out)}</div></div>
-      <div class="tile"><div class="k">Money in</div><div class="v num c-in">${money(inn)}</div></div>
+      <div class="tile"><div class="k">Money out</div><div class="v">${dual(out, { cls: 'c-out' })}</div></div>
+      <div class="tile"><div class="k">Money in</div><div class="v">${dual(inn, { cls: 'c-in' })}</div></div>
     </div>
     <div class="small muted" style="margin:10px 4px 0">${list.length} entries</div>
     ${groupedTxns(list.slice(0, f.limit))}
@@ -237,12 +259,11 @@ function viewActivity() {
 function viewPeople() {
   const pb = peopleBalances();
   const f = ui.people;
-  let owed = 0, owe = 0;
+  const owed = zero(), owe = zero();
   const rows = D().people.filter(p => !p.hidden).map(p => {
-    const e = pb.get(p.id) || { AED: 0, INR: 0 };
-    const v = personAED(e);
-    if (v > 0) owed += v; else owe -= v;
-    return { p, e, v };
+    const e = pb.get(p.id) || zero();
+    for (const c of CURS) { const x = e[c] || 0; if (x > 0) owed[c] += x; else owe[c] -= x; }
+    return { p, e, v: personAED(e) };
   });
   const q = f.q.trim().toLowerCase();
   const show = rows.filter(r => {
@@ -262,8 +283,8 @@ function viewPeople() {
   return `<div class="screen">
     ${topbar('People', { sub: 'Money you lent & borrowed', right: `<button class="icon-btn" data-a="newPerson">${icon('plus')}</button>` })}
     <div class="tiles">
-      <button class="tile" data-a="pf" data-k="owed"><div class="k"><span class="dot" style="background:var(--lend)"></span>They owe you</div><div class="v num c-lend">${money(owed)}</div></button>
-      <button class="tile" data-a="pf" data-k="owe"><div class="k"><span class="dot" style="background:var(--borrow)"></span>You owe</div><div class="v num c-borrow">${money(owe)}</div></button>
+      <button class="tile" data-a="pf" data-k="owed"><div class="k"><span class="dot" style="background:var(--lend)"></span>They owe you</div><div class="v">${dual(owed, { cls: 'c-lend' })}</div></button>
+      <button class="tile" data-a="pf" data-k="owe"><div class="k"><span class="dot" style="background:var(--borrow)"></span>You owe</div><div class="v">${dual(owe, { cls: 'c-borrow' })}</div></button>
     </div>
     <div class="sp"></div>
     <div class="seg">${[['owed', 'Owe you'], ['owe', 'You owe'], ['settled', 'Settled'], ['all', 'All']].map(([k, l]) => `<button class="${f.filter === k ? 'on' : ''}" data-a="pf" data-k="${k}">${l}</button>`).join('')}</div>
@@ -282,18 +303,18 @@ function viewWealth() {
   const nw = netWorth();
   const bal = accountBalances();
   const groups = [['bank', 'Bank accounts'], ['cash', 'Cash & wallets'], ['card', 'Credit cards']];
-  const kuris = D().kuris.filter(k => k.status !== 'closed');
+  const ns = { nosym: true };
+  const row = (label, k, cls = '', neg = false) => `<div class="kv3"><span>${label}</span><span class="num ${cls}">${money(neg ? -nw.AED[k] : nw.AED[k], 'AED', ns)}</span><span class="num ${cls}">${money(neg ? -nw.INR[k] : nw.INR[k], 'INR', ns)}</span></div>`;
   return `<div class="screen">
-    ${topbar('Wealth', { sub: 'Everything you own and owe', right: `<button class="icon-btn" data-a="go" data-v="settings">${icon('settings')}</button>` })}
+    ${topbar('Wealth', { sub: 'What you own and owe', right: `<button class="icon-btn" data-a="go" data-v="settings">${icon('settings')}</button>` })}
     <div class="card">
-      <div class="kv"><span>Bank & cash</span><span class="num">${money(nw.cash)}</span></div>
-      <div class="kv"><span>Credit cards</span><span class="num ${nw.cards < 0 ? 'c-out' : ''}">${money(nw.cards)}</span></div>
-      <div class="kv"><span>Owed to you</span><span class="num c-lend">${money(nw.owed)}</span></div>
-      <div class="kv"><span>You owe</span><span class="num c-borrow">${money(-nw.owe)}</span></div>
-      <div class="kv"><span>Investments & property</span><span class="num c-invest">${money(nw.assets)}</span></div>
-      <div class="kv"><span>Kuri (paid in, not yet received)</span><span class="num c-kuri">${money(nw.kuri)}</span></div>
-      <div class="kv" style="font-size:16px"><span style="color:var(--ink);font-weight:800">Net worth</span><span class="num">${money(nw.total)}</span></div>
-      <div class="small muted" style="margin-top:4px">INR converted at ₹${rate()} per AED · <button class="link" data-a="go" data-v="settings">change</button></div>
+      <div class="kv3 head"><span></span><span>AED</span><span>INR</span></div>
+      ${row('Bank & cash', 'cash')}
+      ${row('Credit cards', 'cards', 'c-out')}
+      ${row('Owed to you', 'owed', 'c-lend')}
+      ${row('You owe', 'owe', 'c-borrow', true)}
+      ${row('Investments & property', 'assets', 'c-invest')}
+      <div class="kv3 total"><span>Net worth</span><span class="num">${money(nw.AED.total, 'AED', ns)}</span><span class="num">${money(nw.INR.total, 'INR', ns)}</span></div>
     </div>
     <div class="section">
       <div class="section-head"><h2>Accounts</h2><button data-a="editAccount">+ Add</button></div>
@@ -302,24 +323,14 @@ function viewWealth() {
         if (!list.length) return '';
         return `<div class="lbl" style="margin-top:12px">${l}</div><div class="list">${list.map(a => accountRow(a, bal)).join('')}</div>`;
       }).join('')}
+      ${D().accounts.some(a => a.closed) ? `<div class="sp"></div><button class="btn ghost block" data-a="go" data-v="accounts">Closed accounts</button>` : ''}
     </div>
     <div class="section">
       <div class="section-head"><h2>Investments & property</h2><button data-a="editAsset">+ Add</button></div>
-      <div class="list">${D().assets.map(s => { const x = assetSummary(s.id); return `<button class="row tap" data-a="go" data-v="asset" data-id="${s.id}">
-        <div class="ic bg-invest">${{ property: '🏠', gold: '🥇', business: '💼', vehicle: '🚗' }[s.kind] || '📈'}</div>
-        <div class="mid"><div class="t">${esc(s.name)}</div><div class="d">Invested ${money(x.net)}${s.value != null && s.value !== '' ? ` · Worth ${money(x.value)}` : ''}</div></div>
-        <div class="amt num c-invest">${money(x.value, 'AED', { short: true })}</div></button>`; }).join('') || '<div class="empty">No investments yet</div>'}</div>
-    </div>
-    <div class="section">
-      <div class="section-head"><h2>Kuri</h2><button data-a="editKuri">+ Add</button></div>
-      <div class="list">${kuris.map(k => kuriRow(k)).join('') || '<div class="empty">No active kuri</div>'}</div>
-      ${D().kuris.some(k => k.status === 'closed') ? `<div class="sp"></div><button class="btn ghost block" data-a="go" data-v="kuris">Closed kuri</button>` : ''}
-    </div>
-    <div class="section">
-      <div class="section-head"><h2>Recurring</h2><button data-a="editRec">+ Add</button></div>
-      <div class="list">${D().recurring.map(r => `<button class="row tap" data-a="editRec" data-id="${r.id}">
-        <div class="ic">🔁</div><div class="mid"><div class="t">${esc(r.title)}</div><div class="d">Every month on day ${r.day} · next ${fmtDate(r.next, true)}${r.active === false ? ' · paused' : ''}</div></div>
-        <div class="amt num">${money(r.amt, acc(r.acc)?.cur || 'AED')}</div></button>`).join('') || '<div class="empty">No recurring entries</div>'}</div>
+      <div class="list">${D().assets.map(s => { const x = assetSummary(s.id); const anyVal = CURS.some(c => x.hasValue[c]); return `<button class="row tap" data-a="go" data-v="asset" data-id="${s.id}">
+        <div class="ic bg-invest">${assetIcon(s)}</div>
+        <div class="mid"><div class="t">${esc(s.name)}</div><div class="d">${anyVal ? 'Current value' : 'Amount invested'}</div></div>
+        <div class="amt c-invest">${dual(x.value, { short: true })}</div></button>`; }).join('') || '<div class="empty">No investments yet</div>'}</div>
     </div>
   </div>`;
 }
@@ -328,15 +339,15 @@ function accountRow(a, bal) {
   const b = bal[a.id];
   return `<button class="row tap" data-a="go" data-v="account" data-id="${a.id}">
     <div class="ic">${icon(a.kind === 'card' ? 'card' : a.kind === 'cash' ? 'cash' : 'bank')}</div>
-    <div class="mid"><div class="t">${esc(a.name)}</div><div class="d">${a.cur === 'INR' ? `≈ ${money(toAED(b, 'INR'))}` : a.kind === 'card' ? (b < -0.01 ? 'Outstanding' : 'Paid up') : 'AED'}</div></div>
+    <div class="mid"><div class="t">${esc(a.name)}</div><div class="d">${a.kind === 'card' ? (b < -0.01 ? 'Outstanding' : 'Paid up') : a.cur}${a.closed ? ' · closed' : ''}</div></div>
     <div class="amt num ${b < -0.01 ? 'c-out' : ''}">${money(b, a.cur)}</div></button>`;
 }
 function kuriRow(k) {
   const s = kuriSummary(k.id);
   return `<button class="row tap" data-a="go" data-v="kuri" data-id="${k.id}">
     <div class="ic bg-kuri">🪙</div>
-    <div class="mid"><div class="t">${esc(k.name)}</div><div class="d">${s.count} instalment${s.count === 1 ? '' : 's'} paid${k.months ? ` of ${k.months}` : ''}${s.got ? ` · received ${money(s.got)}` : ''}</div></div>
-    <div class="amt num c-kuri">${money(s.paid)}<small>paid in</small></div></button>`;
+    <div class="mid"><div class="t">${esc(k.name)}</div><div class="d">${s.count} instalment${s.count === 1 ? '' : 's'} paid${k.months ? ` of ${k.months}` : ''}${isZero(s.got) ? '' : ` · received ${multi(s.got)}`}</div></div>
+    <div class="amt c-kuri">${dual(s.paid)}<small>paid in</small></div></button>`;
 }
 
 // ---------- Detail pages
@@ -354,7 +365,6 @@ function viewAccount(id) {
   if (!a) return viewAccounts();
   const bal = accountBalances()[id];
   const list = sorted(D().txns.filter(t => t.acc === id || t.to === id));
-  // running balance (newest first)
   let run = bal; const runMap = new Map();
   for (const t of list) { runMap.set(t.id, run); run -= effectOn(t, id); }
   const lim = ui.wealth.accLimit || 150;
@@ -362,7 +372,7 @@ function viewAccount(id) {
     <div class="detail-hero">
       <div class="ic-big">${icon(a.kind === 'card' ? 'card' : a.kind === 'cash' ? 'cash' : 'bank')}</div>
       <div class="big num ${bal < 0 ? 'c-out' : ''}">${money(bal, a.cur)}</div>
-      <div class="cap">${a.cur === 'INR' ? `≈ ${money(toAED(bal, 'INR'))} · ` : ''}${{ bank: 'Bank account', cash: 'Cash', card: 'Credit card' }[a.kind]}${a.closed ? ' · closed' : ''}</div>
+      <div class="cap">${{ bank: 'Bank account', cash: 'Cash', card: 'Credit card' }[a.kind]} · ${a.cur}${a.closed ? ' · closed' : ''}</div>
     </div>
     <div class="actions">
       <button data-a="newTxn" data-type="expense" data-acc="${id}"><span class="ai bg-out">${icon('out')}</span>Spend</button>
@@ -378,18 +388,15 @@ function viewAccount(id) {
 function viewPerson(id) {
   const p = personOf(id);
   if (!p) return viewPeople();
-  const e = peopleBalances().get(id) || { AED: 0, INR: 0 };
+  const e = peopleBalances().get(id) || zero();
   const v = personAED(e);
   const list = sorted(personLedger(id));
-  const parts = [];
-  if (Math.abs(e.AED) > 0.004) parts.push(money(Math.abs(e.AED), 'AED'));
-  if (Math.abs(e.INR) > 0.004) parts.push(money(Math.abs(e.INR), 'INR'));
-  let gave = 0, got = 0;
-  for (const t of list) { const s = side(t); const val = toAED(s.amt, s.cur, t.fx); if (t.type === 'lend') gave += val; if (t.type === 'collect') got += val; }
+  const gave = zero(), got = zero();
+  for (const t of list) { const s = side(t); if (t.type === 'lend') addTo(gave, s.cur, s.amt); if (t.type === 'collect') addTo(got, s.cur, s.amt); }
   return `<div class="screen">${topbar(p.name, { back: true, right: `<button class="icon-btn" data-a="editPerson" data-id="${id}">${icon('edit')}</button>` })}
     <div class="detail-hero">
       <div class="ic-big ${v > 0.5 ? 'bg-lend' : v < -0.5 ? 'bg-borrow' : ''}"><b style="font-size:22px">${esc(initials(p.name))}</b></div>
-      <div class="big num ${v > 0.5 ? 'c-lend' : v < -0.5 ? 'c-borrow' : ''}">${parts.join(' + ') || 'Settled'}</div>
+      <div class="big num ${v > 0.5 ? 'c-lend' : v < -0.5 ? 'c-borrow' : ''}">${isZero(e) ? 'Settled' : multi(e, { abs: true, sep: ' + ' })}</div>
       <div class="cap">${v > 0.5 ? `${esc(p.name)} owes you` : v < -0.5 ? `You owe ${esc(p.name)}` : 'Nothing pending'}${p.phone ? ' · ' + esc(p.phone) : ''}</div>
     </div>
     <div class="actions">
@@ -400,28 +407,30 @@ function viewPerson(id) {
       <button data-a="sharePerson" data-id="${id}"><span class="ai bg-move">${icon('share')}</span>Share</button>
     </div>
     <div class="section card">
-      <div class="kv"><span>Total given</span><span class="num">${money(gave)}</span></div>
-      <div class="kv"><span>Total got back</span><span class="num">${money(got)}</span></div>
+      <div class="kv"><span>Total given</span><span class="num">${multi(gave)}</span></div>
+      <div class="kv"><span>Total got back</span><span class="num">${multi(got)}</span></div>
     </div>
     <div class="section">${groupedTxns(list, { inPerson: id })}</div>
   </div>`;
 }
 
 function viewKuris() {
+  const tot = kuriTotals();
   return `<div class="screen">${topbar('Kuri', { back: true, right: `<button class="icon-btn" data-a="editKuri">${icon('plus')}</button>` })}
-    <div class="lbl">Active</div><div class="list">${D().kuris.filter(k => k.status !== 'closed').map(kuriRow).join('') || '<div class="empty">None</div>'}</div>
+    <div class="card"><div class="kv"><span>Paid in, not yet received</span><span class="num c-kuri">${multi(tot)}</span></div></div>
+    <div class="lbl" style="margin-top:18px">Active</div><div class="list">${D().kuris.filter(k => k.status !== 'closed').map(kuriRow).join('') || '<div class="empty">None</div>'}</div>
     <div class="lbl" style="margin-top:18px">Closed</div><div class="list">${D().kuris.filter(k => k.status === 'closed').map(kuriRow).join('') || '<div class="empty">None</div>'}</div>
   </div>`;
 }
 
 function viewKuri(id) {
   const k = kuriOf(id);
-  if (!k) return viewWealth();
+  if (!k) return viewKuris();
   const s = kuriSummary(id);
   const left = k.months ? Math.max(0, k.months - s.count) : null;
   return `<div class="screen">${topbar(k.name, { back: true, sub: 'Kuri', right: `<button class="icon-btn" data-a="editKuri" data-id="${id}">${icon('edit')}</button>` })}
     <div class="detail-hero"><div class="ic-big bg-kuri">🪙</div>
-      <div class="big num c-kuri">${money(s.paid)}</div><div class="cap">paid in over ${s.count} instalment${s.count === 1 ? '' : 's'}</div></div>
+      <div class="big c-kuri">${dual(s.paid)}</div><div class="cap">paid in over ${s.count} instalment${s.count === 1 ? '' : 's'}</div></div>
     <div class="actions">
       <button data-a="newTxn" data-type="kuri_pay" data-kuri="${id}"><span class="ai bg-kuri">${icon('out')}</span>Pay instalment</button>
       <button data-a="newTxn" data-type="kuri_get" data-kuri="${id}"><span class="ai bg-in">${icon('in')}</span>Got payout</button>
@@ -430,8 +439,8 @@ function viewKuri(id) {
       ${k.instalment ? `<div class="kv"><span>Instalment</span><span class="num">${money(k.instalment, k.cur)}</span></div>` : ''}
       ${k.months ? `<div class="kv"><span>Instalments left</span><span class="num">${left} of ${k.months}</span></div>` : ''}
       ${k.total ? `<div class="kv"><span>Kuri value</span><span class="num">${money(k.total, k.cur)}</span></div>` : ''}
-      <div class="kv"><span>Received</span><span class="num c-in">${money(s.got)}</span></div>
-      <div class="kv"><span>${s.net >= 0 ? 'Still to receive back' : 'Received more than paid'}</span><span class="num">${money(Math.abs(s.net))}</span></div>
+      <div class="kv"><span>Received</span><span class="num c-in">${multi(s.got)}</span></div>
+      <div class="kv"><span>Paid in minus received</span><span class="num">${multi(s.net)}</span></div>
     </div>
     <div class="section">${groupedTxns(sorted(s.list))}</div>
   </div>`;
@@ -441,19 +450,20 @@ function viewAsset(id) {
   const a = assetOf(id);
   if (!a) return viewWealth();
   const s = assetSummary(id);
+  const anyVal = CURS.some(c => s.hasValue[c]);
   return `<div class="screen">${topbar(a.name, { back: true, sub: 'Investment', right: `<button class="icon-btn" data-a="editAsset" data-id="${id}">${icon('edit')}</button>` })}
-    <div class="detail-hero"><div class="ic-big bg-invest">${{ property: '🏠', gold: '🥇', business: '💼', vehicle: '🚗' }[a.kind] || '📈'}</div>
-      <div class="big num c-invest">${money(s.value)}</div><div class="cap">${a.value != null && a.value !== '' ? 'current value' : 'invested (set a current value to track gain)'}</div></div>
+    <div class="detail-hero"><div class="ic-big bg-invest">${assetIcon(a)}</div>
+      <div class="big c-invest">${dual(s.value)}</div><div class="cap">${anyVal ? 'current value' : 'invested · tap “Update value” to track gain'}</div></div>
     <div class="actions">
       <button data-a="newTxn" data-type="invest" data-asset="${id}"><span class="ai bg-invest">${icon('out')}</span>Invest more</button>
       <button data-a="newTxn" data-type="asset_in" data-asset="${id}"><span class="ai bg-in">${icon('in')}</span>Got return</button>
       <button data-a="setValue" data-id="${id}"><span class="ai bg-move">${icon('trend')}</span>Update value</button>
     </div>
     <div class="section card">
-      <div class="kv"><span>Total invested</span><span class="num">${money(s.invested)}</span></div>
-      <div class="kv"><span>Returns / withdrawn</span><span class="num c-in">${money(s.returned)}</span></div>
-      <div class="kv"><span>Net invested</span><span class="num">${money(s.net)}</span></div>
-      ${a.value != null && a.value !== '' ? `<div class="kv"><span>Gain</span><span class="num ${s.gain >= 0 ? 'c-in' : 'c-out'}">${money(s.gain, 'AED', { plus: true })}</span></div>` : ''}
+      <div class="kv"><span>Total invested</span><span class="num">${multi(s.invested)}</span></div>
+      <div class="kv"><span>Returns / withdrawn</span><span class="num c-in">${multi(s.returned)}</span></div>
+      <div class="kv"><span>Net invested</span><span class="num">${multi(s.net)}</span></div>
+      ${anyVal ? `<div class="kv"><span>Gain</span><span class="num">${multi(s.gain, { plus: true })}</span></div>` : ''}
       ${a.note ? `<div class="small muted" style="padding-top:8px">${esc(a.note)}</div>` : ''}
     </div>
     <div class="section">${groupedTxns(sorted(s.list))}</div>
@@ -462,19 +472,15 @@ function viewAsset(id) {
 
 function viewReports() {
   const r = ui.report;
+  r.cur ||= 'AED';
+  const C = r.cur;
   const isMonth = r.mode === 'month';
   const period = isMonth ? r.ym : r.y;
-  let spent = 0, earned = 0; const byCat = new Map(); const incCat = new Map();
-  for (const t of D().txns) {
-    if (!t.date.startsWith(period)) continue;
-    if (t.type === 'expense') { const v = tAED(t); spent += v; byCat.set(t.cat, (byCat.get(t.cat) || 0) + v); }
-    if (t.type === 'income') { const v = tAED(t); earned += v; incCat.set(t.cat, (incCat.get(t.cat) || 0) + v); }
-  }
-  // bars: 12 months ending at selected month, or 12 months of selected year
+  const tot = periodTotals(period)[C];
   const months = [];
   if (isMonth) { for (let i = 11; i >= 0; i--) months.push(addMonths(r.ym + '-01', -i, 1).slice(0, 7)); }
   else for (let i = 1; i <= 12; i++) months.push(`${r.y}-${String(i).padStart(2, '0')}`);
-  const series = months.map(ym => ({ ym, ...monthTotals(ym) }));
+  const series = months.map(ym => ({ ym, ...periodTotals(ym)[C] }));
   const max = Math.max(1, ...series.map(s => Math.max(s.spent, s.earned)));
   const W = 340, H = 150, bw = W / 12;
   const bars = series.map((s, i) => {
@@ -486,45 +492,50 @@ function viewReports() {
       <rect x="${x + bw * 0.52}" y="${H - 16 - hs}" width="${bw * 0.32}" height="${Math.max(hs, 1)}" rx="3" fill="var(--out)" opacity="${sel || !isMonth ? 1 : .45}"/>
       <text x="${x + bw / 2}" y="${H - 3}" text-anchor="middle" ${sel ? 'style="fill:var(--ink)"' : ''}>${MONTH_NAMES[+s.ym.slice(5) - 1][0]}</text></g>`;
   }).join('');
-  const cats = [...byCat.entries()].sort((a, b) => b[1] - a[1]);
-  const incs = [...incCat.entries()].sort((a, b) => b[1] - a[1]);
+  const cats = [...tot.byCat.entries()].sort((a, b) => b[1] - a[1]);
+  const incs = [...tot.incCat.entries()].sort((a, b) => b[1] - a[1]);
   const catRows = (arr, total, type) => arr.map(([cid, v]) => { const c = catOf(cid); return `<button class="legend-row" style="width:100%;text-align:left" data-a="goAct" data-cat="${cid}" data-type="${type}" data-month="${isMonth ? period : ''}">
-    <span style="font-size:20px;width:26px;text-align:center">${c?.icon || '🏷️'}</span><div class="grow"><div class="flex"><b class="grow">${esc(c?.name || 'Other')}</b><span class="small muted">${Math.round(v / total * 100)}%</span><b class="num" style="min-width:90px;text-align:right">${money(v)}</b></div>
+    <span style="font-size:20px;width:26px;text-align:center">${c?.icon || '🏷️'}</span><div class="grow"><div class="flex"><b class="grow">${esc(c?.name || 'Other')}</b><span class="small muted">${Math.round(v / total * 100)}%</span><b class="num" style="min-width:90px;text-align:right">${money(v, C)}</b></div>
     <div class="bar"><i style="width:${Math.max(2, v / arr[0][1] * 100)}%;background:${type === 'income' ? 'var(--in)' : 'var(--brand)'}"></i></div></div></button>`; }).join('');
 
   return `<div class="screen">${topbar('Reports', { back: true })}
-    <div class="seg"><button class="${isMonth ? 'on' : ''}" data-a="repMode" data-k="month">Month</button><button class="${!isMonth ? 'on' : ''}" data-a="repMode" data-k="year">Year</button></div>
+    <div class="row2"><div class="seg"><button class="${isMonth ? 'on' : ''}" data-a="repMode" data-k="month">Month</button><button class="${!isMonth ? 'on' : ''}" data-a="repMode" data-k="year">Year</button></div>
+    <div class="seg">${CURS.map(c => `<button class="${C === c ? 'on' : ''}" data-a="repCur" data-k="${c}">${c}</button>`).join('')}</div></div>
     <div class="flex" style="margin:14px 0 6px">
       <button class="icon-btn" data-a="repNav" data-d="-1">${icon('back')}</button>
       <div class="grow" style="text-align:center;font-weight:800;font-size:17px">${isMonth ? fmtMonth(period) : period}</div>
       <button class="icon-btn" data-a="repNav" data-d="1" style="transform:scaleX(-1)">${icon('back')}</button>
     </div>
     <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
-      <div class="tile"><div class="k">Earned</div><div class="v num c-in" style="font-size:15px">${money(earned, 'AED', { short: true })}</div></div>
-      <div class="tile"><div class="k">Spent</div><div class="v num c-out" style="font-size:15px">${money(spent, 'AED', { short: true })}</div></div>
-      <div class="tile"><div class="k">Saved</div><div class="v num" style="font-size:15px">${money(earned - spent, 'AED', { short: true })}</div></div>
+      <div class="tile"><div class="k">Earned</div><div class="v num c-in" style="font-size:15px">${money(tot.earned, C, { short: true })}</div></div>
+      <div class="tile"><div class="k">Spent</div><div class="v num c-out" style="font-size:15px">${money(tot.spent, C, { short: true })}</div></div>
+      <div class="tile"><div class="k">Saved</div><div class="v num" style="font-size:15px">${money(tot.earned - tot.spent, C, { short: true })}</div></div>
     </div>
     <div class="section card">
       <div class="flex small" style="margin-bottom:8px;font-weight:700"><span class="dot" style="background:var(--in)"></span>Earned <span class="dot" style="background:var(--out);margin-left:8px"></span>Spent <span class="grow"></span><span class="muted">Tap a month</span></div>
       <svg class="chart" viewBox="0 0 ${W} ${H}">${bars}</svg>
     </div>
     <div class="section"><div class="section-head"><h2>Spending by category</h2></div>
-      <div class="card">${catRows(cats, spent || 1, 'expense') || '<div class="empty">No spending</div>'}</div></div>
+      <div class="card">${catRows(cats, tot.spent || 1, 'expense') || '<div class="empty">No spending</div>'}</div></div>
     <div class="section"><div class="section-head"><h2>Income by source</h2></div>
-      <div class="card">${catRows(incs, earned || 1, 'income') || '<div class="empty">No income</div>'}</div></div>
+      <div class="card">${catRows(incs, tot.earned || 1, 'income') || '<div class="empty">No income</div>'}</div></div>
   </div>`;
 }
 
 function viewSettings() {
   const s = D().settings;
+  const drive = s.drive || {};
+  const bio = isNative() && window.KanakkuNative.bioAvailable?.();
   return `<div class="screen">${topbar('Settings', { back: true })}
     <div class="lbl">Currency</div>
     <div class="list">
-      <button class="row tap" data-a="editRate"><div class="ic">₹</div><div class="mid"><div class="t">INR rate</div><div class="d">1 AED = ₹${rate()} · used for totals & net worth</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="editRate"><div class="ic">₹</div><div class="mid"><div class="t">AED → INR rate</div><div class="d">1 AED = ₹${rate()} · only used to suggest amounts in transfers</div></div>${icon('chevron', 'chev')}</button>
     </div>
-    <div class="lbl" style="margin-top:18px">Your data</div>
+    <div class="lbl" style="margin-top:18px">Backup</div>
     <div class="list">
-      <button class="row tap" data-a="backup"><div class="ic bg-in">${icon('download')}</div><div class="mid"><div class="t">Save backup</div><div class="d" id="lastBackup">Saves a file to Downloads/Kanakku</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="backup"><div class="ic bg-in">${icon('download')}</div><div class="mid"><div class="t">Save backup now</div><div class="d" id="lastBackup">Saves a file to Downloads/Kanakku</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="driveShare"><div class="ic">☁️</div><div class="mid"><div class="t">Back up to Google Drive</div><div class="d">Save and share to Drive in one tap</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="driveMode"><div class="ic">🔄</div><div class="mid"><div class="t">Monthly Drive backup</div><div class="d">${{ off: 'Off', remind: 'Remind me each month (one tap)', auto: `Automatic${drive.account ? ' · ' + esc(drive.account) : ''}` }[drive.mode || 'off']}${drive.last ? ` · last ${fmtDate(drive.last.slice(0, 10), true)}` : ''}</div></div>${icon('chevron', 'chev')}</button>
       <button class="row tap" data-a="restore"><div class="ic">${icon('upload')}</div><div class="mid"><div class="t">Restore backup</div><div class="d">Replace everything with a Kanakku backup file</div></div>${icon('chevron', 'chev')}</button>
       <button class="row tap" data-a="importVyapar"><div class="ic">📥</div><div class="mid"><div class="t">Import from Vyapar</div><div class="d">Replace everything with a Vyapar .vyb backup</div></div>${icon('chevron', 'chev')}</button>
       <button class="row tap" data-a="exportCsv"><div class="ic">${icon('list')}</div><div class="mid"><div class="t">Export to Excel (CSV)</div><div class="d">All entries as a spreadsheet</div></div>${icon('chevron', 'chev')}</button>
@@ -536,12 +547,13 @@ function viewSettings() {
     </div>
     <div class="lbl" style="margin-top:18px">Privacy & look</div>
     <div class="list">
-      <button class="row tap" data-a="setPin"><div class="ic">${icon('lock')}</div><div class="mid"><div class="t">App lock</div><div class="d">${s.pinHash ? 'On · tap to change or remove' : 'Off · protect with a 4-digit PIN'}</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="setPin"><div class="ic">${icon('lock')}</div><div class="mid"><div class="t">App lock</div><div class="d">${s.pinHash ? 'On · tap to turn off' : 'Off · protect with a 4-digit PIN'}</div></div>${icon('chevron', 'chev')}</button>
+      ${bio ? `<button class="row tap" data-a="toggleBio"><div class="ic">👆</div><div class="mid"><div class="t">Unlock with fingerprint</div><div class="d">${s.bio ? 'On' : s.pinHash ? 'Off' : 'Turn on App lock first'}</div></div><span class="switch ${s.bio ? 'on' : ''}"></span></button>` : ''}
       <button class="row tap" data-a="theme"><div class="ic">🌓</div><div class="mid"><div class="t">Theme</div><div class="d">${{ auto: 'Follow phone', light: 'Light', dark: 'Dark' }[s.theme || 'auto']}</div></div>${icon('chevron', 'chev')}</button>
     </div>
     <div class="sp"></div><div class="sp"></div>
     <button class="btn danger block" data-a="wipe">Delete all data</button>
-    <p class="small muted" style="text-align:center;margin-top:16px">Kanakku ${isNative() ? esc(window.KanakkuNative.version()) : 'web'} · works fully offline · your data never leaves this phone</p>
+    <p class="small muted" style="text-align:center;margin-top:16px">Kanakku ${isNative() ? esc(window.KanakkuNative.version()) : 'web'} · works offline · your data stays on this phone${drive.mode === 'auto' ? ' and your own Google Drive' : ''}</p>
   </div>`;
 }
 
@@ -554,7 +566,7 @@ function viewCategories() {
   return `<div class="screen">${topbar('Categories', { back: true })}${sec('expense', 'Expense')}${sec('income', 'Income')}</div>`;
 }
 
-const VIEWS = { accounts: viewAccounts, account: viewAccount, person: viewPerson, kuris: viewKuris, kuri: viewKuri, asset: viewAsset, reports: viewReports, settings: viewSettings, categories: viewCategories };
+const VIEWS = { accounts: viewAccounts, account: viewAccount, person: viewPerson, kuris: viewKuris, kuri: viewKuri, asset: viewAsset, reports: viewReports, settings: viewSettings, categories: viewCategories, recurring: viewRecurring, projects: viewProjects, project: viewProject, zakat: viewZakat };
 const TABS = { home: viewHome, activity: viewActivity, people: viewPeople, wealth: viewWealth };
 
 function nav() {
@@ -728,6 +740,15 @@ function formBody(f, editing) {
   } else {
     html += catGrid(f);
     html += accPicker(f, 'acc', f.type === 'expense' ? 'Paid from' : 'Received into');
+    if (f.type === 'expense' && zakatCats().includes(f.cat)) {
+      const y0 = +todayISO().slice(0, 4);
+      const cur = f.zakatYear || paymentYear({ ...f, date: f.date || todayISO() });
+      html += `<div class="field"><div class="lbl">Zakat for year</div><div class="seg">${[y0 - 2, y0 - 1, y0].map(y => `<button class="${String(cur) === String(y) ? 'on' : ''}" data-a="fset" data-k="zakatYear" data-v="${y}">${y}</button>`).join('')}</div></div>`;
+    }
+    const projs = D().projects.filter(p => p.status !== 'done' || p.id === f.project);
+    if (projs.length) html += `<div class="field"><div class="lbl">Project <span style="text-transform:none;font-weight:600">(optional)</span></div><div class="chips">
+      <button class="chip ${!f.project ? 'on' : ''}" data-a="fset" data-k="project" data-v="">None</button>
+      ${projs.map(p => `<button class="chip ${f.project === p.id ? 'on' : ''}" data-a="fset" data-k="project" data-v="${p.id}">${p.icon || '🏗️'} ${esc(p.name)}</button>`).join('')}</div></div>`;
   }
 
   html += `<div class="row2"><div class="field"><div class="lbl">Date</div><input type="date" class="input" value="${f.date}" data-in="fdate"></div>
@@ -775,6 +796,8 @@ function saveTxn(sheet) {
   if (f.type === 'expense' || f.type === 'income') {
     if (!f.cat) return toast('Pick a category');
     t.cat = f.cat; if (f.sub && f.sub.trim()) t.sub = f.sub.trim();
+    if (f.project) t.project = f.project;
+    if (f.type === 'expense' && zakatCats().includes(f.cat) && f.zakatYear) t.zakatYear = String(f.zakatYear);
   }
   if (group === 'loan') { if (!f.person) return toast('Choose a person'); t.person = f.person; if (!t.acc) t.cur = f.cur || 'AED'; }
   if (group === 'kuri') { if (!f.kuri) return toast('Choose a kuri'); t.kuri = f.kuri; }
@@ -925,17 +948,16 @@ function editAsset(id) {
   const s = id ? assetOf(id) : null;
   formSheet({
     title: s ? 'Edit investment' : 'New investment',
-    values: s ? { ...s, value: s.value ?? '' } : { kind: 'investment', cur: 'AED', value: '' },
+    values: s ? { ...s } : { kind: 'investment' },
     fields: [
       { key: 'name', label: 'Name', ph: 'e.g. Plot in Kasaragod' },
-      { key: 'kind', label: 'Type', type: 'select', options: () => [['investment', 'Investment'], ['property', 'Property / land'], ['gold', 'Gold'], ['business', 'Business'], ['vehicle', 'Vehicle'], ['other', 'Other']] },
-      { key: 'value', label: 'Current value in AED (optional)', type: 'number', ph: 'Leave empty to use amount invested' },
+      { key: 'kind', label: 'Type', type: 'select', options: () => [['investment', 'Investment / shares'], ['property', 'Property / land'], ['gold', 'Gold'], ['business', 'Business'], ['vehicle', 'Vehicle'], ['other', 'Other']] },
       { key: 'note', label: 'Note', ph: 'Location, documents, etc.' },
+      ...(s ? [{ type: 'note', text: () => `Is this really spending (like construction or interior work)? <button class="link" data-a="assetToProject" data-id="${s.id}">Turn it into a project</button> – its entries become expenses.` }] : []),
     ],
     onSave: (v) => {
       if (!v.name?.trim()) return 'Enter a name';
-      const val = String(v.value ?? '').trim() === '' ? null : evalAmount(v.value);
-      const o = { ...(s || { id: newId('s') }), name: v.name.trim(), kind: v.kind, cur: 'AED', value: val, note: v.note };
+      const o = { ...(s || { id: newId('s'), values: {} }), name: v.name.trim(), kind: v.kind, note: v.note };
       if (s) Object.assign(s, o); else D().assets.push(o);
     },
     onDelete: s && !D().txns.some(t => t.asset === s.id) ? () => { D().assets = D().assets.filter(x => x.id !== s.id); } : null,
@@ -1047,11 +1069,170 @@ function adjustBalance(id) {
 
 function setValue(id) {
   const s = assetOf(id);
+  const x = assetSummary(id);
   formSheet({
-    title: 'Current value', values: { value: s.value ?? '' },
-    fields: [{ key: 'value', label: 'What is it worth today? (AED)', type: 'number', ph: 'Leave empty to use amount invested' }],
-    onSave: (v) => { s.value = String(v.value).trim() === '' ? null : evalAmount(v.value); },
+    title: 'Current value', values: { AED: s.values?.AED ?? '', INR: s.values?.INR ?? '' },
+    fields: [
+      { type: 'note', text: () => `What would it sell for today? Leave empty to use the amount invested (${multi(x.net)}).` },
+      { key: 'AED', label: 'Value in AED', type: 'number', ph: String(Math.round(x.net.AED)) },
+      { key: 'INR', label: 'Value in INR', type: 'number', ph: String(Math.round(x.net.INR)) },
+    ],
+    onSave: (v) => {
+      s.values ||= {};
+      for (const c of CURS) { const raw = String(v[c] ?? '').trim(); if (raw === '') delete s.values[c]; else s.values[c] = evalAmount(raw); }
+    },
   });
+}
+
+function dual(o, opts = {}) {
+  const cls = opts.cls || '';
+  const rows = CURS.filter(c => Math.abs(o[c] || 0) >= 0.005);
+  if (!rows.length) rows.push('AED');
+  return rows.map((c, i) => `<div class="num ${cls} ${i ? 'dual2' : ''}">${money(o[c] || 0, c, opts)}</div>`).join('');
+}
+
+function assetIcon(s) {
+  return { property: '🏠', gold: '🥇', business: '💼', vehicle: '🚗' }[s.kind] || '📈';
+}
+
+function viewRecurring() {
+  return `<div class="screen">${topbar('Recurring', { back: true, right: `<button class="icon-btn" data-a="editRec">${icon('plus')}</button>` })}
+    <p class="small muted" style="margin:0 4px 12px">Payments that repeat every month. On the due day Kanakku reminds you on Home and you record it with one tap.</p>
+    <div class="list">${D().recurring.map(r => `<button class="row tap" data-a="editRec" data-id="${r.id}">
+      <div class="ic">🔁</div><div class="mid"><div class="t">${esc(r.title)}</div><div class="d">Day ${r.day} of each month · next ${fmtDate(r.next, true)}${r.active === false ? ' · paused' : ''}</div></div>
+      <div class="amt num">${money(r.amt, acc(r.acc)?.cur || 'AED')}</div></button>`).join('') || '<div class="empty">No recurring entries</div>'}</div>
+  </div>`;
+}
+
+function viewProjects() {
+  const act = D().projects.filter(p => p.status !== 'done'), done = D().projects.filter(p => p.status === 'done');
+  const row = (p) => { const s = projectSummary(p.id); const pct = p.budget ? Math.min(100, (s.spent[p.cur || 'AED'] || 0) / p.budget * 100) : null; return `<button class="row tap" data-a="go" data-v="project" data-id="${p.id}">
+    <div class="ic bg-invest">${p.icon || '🏗️'}</div><div class="mid"><div class="t">${esc(p.name)}</div><div class="d">${s.list.length} entries${p.budget ? ` · ${Math.round(pct)}% of budget` : ''}</div>${pct != null ? `<div class="bar"><i style="width:${pct}%;background:${pct >= 100 ? 'var(--out)' : 'var(--invest)'}"></i></div>` : ''}</div>
+    <div class="amt">${dual(s.spent)}</div></button>`; };
+  return `<div class="screen">${topbar('Projects', { back: true, right: `<button class="icon-btn" data-a="editProject">${icon('plus')}</button>` })}
+    <p class="small muted" style="margin:0 4px 12px">Group spending for big things – house construction, interior work, a wedding, a trip – and see the total against a budget. It still counts as normal spending.</p>
+    <div class="list">${act.map(row).join('') || '<div class="empty"><span class="big">🏗️</span>No projects yet</div>'}</div>
+    ${done.length ? `<div class="lbl" style="margin-top:18px">Finished</div><div class="list">${done.map(row).join('')}</div>` : ''}
+  </div>`;
+}
+
+function viewProject(id) {
+  const p = projectOf(id);
+  if (!p) return viewProjects();
+  const s = projectSummary(id);
+  const C = p.cur || 'AED';
+  const pct = p.budget ? (s.spent[C] || 0) / p.budget * 100 : null;
+  const cats = [...s.byCat.entries()].sort((a, b) => (b[1].AED + b[1].INR / 25) - (a[1].AED + a[1].INR / 25));
+  return `<div class="screen">${topbar(p.name, { back: true, sub: 'Project', right: `<button class="icon-btn" data-a="editProject" data-id="${id}">${icon('edit')}</button>` })}
+    <div class="detail-hero"><div class="ic-big bg-invest">${p.icon || '🏗️'}</div>
+      <div class="big">${dual(s.spent)}</div><div class="cap">spent so far${p.budget ? ` · budget ${money(p.budget, C)}` : ''}</div></div>
+    ${pct != null ? `<div class="card" style="margin-top:12px"><div class="flex"><b class="grow">${Math.round(pct)}% of budget used</b><span class="num ${pct > 100 ? 'c-out' : ''}">${money(p.budget - (s.spent[C] || 0), C)} left</span></div><div class="bar"><i style="width:${Math.min(100, pct)}%;background:${pct > 100 ? 'var(--out)' : 'var(--invest)'}"></i></div></div>` : ''}
+    <div class="actions"><button data-a="newTxn" data-type="expense" data-project="${id}"><span class="ai bg-out">${icon('out')}</span>Add expense</button></div>
+    ${cats.length ? `<div class="section"><div class="section-head"><h2>By category</h2></div><div class="card">${cats.map(([k, v]) => { const c = catOf(k); return `<div class="kv"><span>${c?.icon || ''} ${esc(c?.name || TYPES[k]?.label || 'Other')}</span><span class="num">${multi(v)}</span></div>`; }).join('')}</div></div>` : ''}
+    <div class="section">${groupedTxns(sorted(s.list), { inProject: id })}</div>
+  </div>`;
+}
+
+function viewZakat(yearArg) {
+  const thisYear = +todayISO().slice(0, 4);
+  const y = String(yearArg || ui.zakatYear || (todayISO().slice(5) < '12-31' ? thisYear : thisYear));
+  ui.zakatYear = y;
+  const v = zakatView(y);
+  const st = v.st;
+  const inc = st.include;
+  const years = []; for (let i = thisYear; i >= thisYear - 4; i--) years.push(String(i));
+  const ns = { nosym: true };
+  const line = (label, k, sign = 1, cls = '', on = true) => `<div class="kv3 ${on ? '' : 'off'}"><span>${label}</span><span class="num ${cls}">${money(sign * v.comps.AED[k], 'AED', ns)}</span><span class="num ${cls}">${money(sign * v.comps.INR[k], 'INR', ns)}</span></div>`;
+  const tog = (k, label) => `<button class="chip ${inc[k] ? 'on' : ''}" data-a="zInc" data-k="${k}" ${st.locked ? 'disabled' : ''}>${inc[k] ? '✓ ' : ''}${label}</button>`;
+  const leftPos = { AED: Math.max(0, v.left.AED), INR: Math.max(0, v.left.INR) };
+  const paidPct = (c) => v.due[c] ? Math.min(100, v.paid[c] / v.due[c] * 100) : 0;
+  return `<div class="screen">${topbar('Zakat', { back: true, sub: 'Calculated on 31 December each year' })}
+    <div class="chips">${years.map(yy => `<button class="chip ${yy === y ? 'on' : ''}" data-a="zYear" data-k="${yy}">${yy}</button>`).join('')}</div>
+    <div class="hero" style="margin-top:8px">
+      <div class="label">Zakat ${y} ${v.final ? '' : '· estimate so far'}</div>
+      <div class="value num" style="margin-bottom:2px">${money(v.due.AED)}</div>
+      ${v.due.INR ? `<div class="value2 num">${money(v.due.INR, 'INR')}</div>` : ''}
+      <div class="split" style="grid-template-columns:1fr 1fr;margin-top:12px">
+        <div><span>Given</span><b>${dual(v.paid)}</b></div>
+        <div><span>Still to give</span><b>${dual(leftPos)}</b></div>
+      </div>
+    </div>
+    ${CURS.filter(c => v.due[c]).map(c => `<div class="bar" style="margin:10px 4px 0;height:10px"><i style="width:${paidPct(c)}%;background:var(--in)"></i></div><div class="small muted" style="margin:4px 4px 0">${c}: ${Math.round(paidPct(c))}% given</div>`).join('')}
+    <div class="actions"><button data-a="zPay" data-k="${y}"><span class="ai bg-in">${icon('out')}</span>Give zakat</button>
+      <button data-a="zGold" data-k="${y}"><span class="ai bg-kuri">🥇</span>Gold price</button>
+      <button data-a="zLock" data-k="${y}"><span class="ai bg-move">${icon('lock')}</span>${st.locked ? 'Unlock' : 'Finalise'}</button></div>
+
+    <div class="section"><div class="section-head"><h2>Calculation</h2><span class="small muted">${st.locked ? 'Finalised' : 'Balances on'} ${fmtDate(v.asOf, true)}</span></div>
+      <div class="card">
+        <div class="kv3 head"><span></span><span>AED</span><span>INR</span></div>
+        ${line('Bank & cash', 'cash')}
+        ${line('+ Owed to you', 'owed', 1, 'c-lend', inc.owed)}
+        ${line('− You owe', 'owe', -1, 'c-borrow', inc.owe)}
+        ${line('− Credit card dues', 'cards', 1, 'c-out', inc.cards)}
+        ${inc.invest ? line('+ Investments', 'invest', 1, 'c-invest') : ''}
+        ${inc.gold ? line('+ Gold', 'gold', 1, 'c-kuri') : ''}
+        <div class="kv3 total"><span>Zakatable</span><span class="num">${money(v.comps.AED.total, 'AED', ns)}</span><span class="num">${money(v.comps.INR.total, 'INR', ns)}</span></div>
+        <div class="kv3"><span>Zakat 2.5%</span><span class="num c-in">${money(v.due.AED, 'AED', ns)}</span><span class="num c-in">${money(v.due.INR, 'INR', ns)}</span></div>
+      </div>
+      <div class="chips" style="margin-top:10px">${tog('owed', 'Owed to you')}${tog('owe', 'You owe')}${tog('cards', 'Card dues')}${tog('invest', 'Investments')}${tog('gold', 'Gold')}</div>
+    </div>
+
+    <div class="section card">
+      <div class="flex"><b class="grow">Nisab (85 g gold)</b>${v.nisab ? `<span class="pill ${v.above ? 'bg-in' : 'bg-out'}">${v.above ? 'Above nisab' : 'Below nisab'}</span>` : ''}</div>
+      ${v.nisab ? `<div class="kv"><span>Gold price</span><span class="num">${money(v.goldPrice)} / g</span></div>
+        <div class="kv"><span>Nisab</span><span class="num">${money(v.nisab)}</span></div>
+        <div class="kv"><span>Your total (₹ counted at ₹${v.fx} only for this check)</span><span class="num">${money(v.combined)}</span></div>`
+        : `<p class="small muted" style="margin:6px 0 0">Add the gold price per gram (24K, in AED) to check nisab. <button class="link" data-a="zGold" data-k="${y}">Add price</button></p>`}
+    </div>
+
+    <div class="section"><div class="section-head"><h2>Given for ${y}</h2><button data-a="zPay" data-k="${y}">+ Give</button></div>
+      ${groupedTxns(sorted(v.paidList))}
+    </div>
+    <p class="small muted" style="margin:14px 4px">Payments in the Zakat category count towards the year written in the note (e.g. “Zakat 2025”), or otherwise the year before they were paid. When you give zakat from here, it is linked to ${y} automatically.</p>
+  </div>`;
+}
+
+function editProject(id) {
+  const p = id ? projectOf(id) : null;
+  formSheet({
+    title: p ? 'Edit project' : 'New project',
+    values: p ? { ...p, budget: p.budget ?? '' } : { cur: 'AED', status: 'active', icon: '🏗️' },
+    fields: [
+      { key: 'icon', label: 'Icon (any emoji)' },
+      { key: 'name', label: 'Name', ph: 'e.g. House construction' },
+      { key: 'cur', label: 'Budget currency', type: 'seg', options: [['AED', 'AED'], ['INR', 'INR']] },
+      { key: 'budget', label: 'Budget (optional)', type: 'number' },
+      { key: 'status', label: 'Status', type: 'seg', options: [['active', 'Active'], ['done', 'Finished']] },
+    ],
+    onSave: (v) => {
+      if (!v.name?.trim()) return 'Enter a name';
+      const b = String(v.budget ?? '').trim();
+      const o = { ...(p || { id: newId('j') }), name: v.name.trim(), icon: (v.icon || '🏗️').trim().slice(0, 4), cur: v.cur, budget: b ? evalAmount(b) : null, status: v.status };
+      if (p) Object.assign(p, o); else D().projects.push(o);
+    },
+    onDelete: p ? () => { for (const t of D().txns) if (t.project === p.id) delete t.project; D().projects = D().projects.filter(x => x.id !== p.id); } : null,
+    deleteLabel: 'Delete project? (entries are kept)',
+  });
+}
+
+function assetToProject(id) {
+  const s = assetOf(id);
+  confirmSheet(`Turn “${s.name}” into a project?`, 'Its investment entries become expenses in a category of the same name, grouped under a new project. Money returned becomes a refund. Your account balances do not change.', 'Convert', () => {
+    let cat = D().categories.find(c => c.kind === 'expense' && c.name.toLowerCase() === s.name.toLowerCase());
+    if (!cat) { cat = { id: newId('c'), kind: 'expense', name: s.name, icon: '🏗️' }; D().categories.push(cat); }
+    let refund = D().categories.find(c => c.kind === 'income' && /^refund/i.test(c.name));
+    const p = { id: newId('j'), name: s.name, icon: '🏗️', cur: 'AED', status: 'active', budget: null };
+    D().projects.push(p);
+    for (const t of D().txns) {
+      if (t.asset !== id) continue;
+      delete t.asset; delete t.amt2; delete t.cur2;
+      t.project = p.id;
+      if (t.type === 'invest') { t.type = 'expense'; t.cat = cat.id; }
+      else { if (!refund) { refund = { id: newId('c'), kind: 'income', name: 'Refunds', icon: '↩️' }; D().categories.push(refund); } t.type = 'income'; t.cat = refund.id; }
+    }
+    D().assets = D().assets.filter(x => x.id !== id);
+    store.save(); closeAllSheets(); ui.stack = [{ v: 'project', id: p.id }]; render(); toast('Converted to a project');
+  }, false);
 }
 
 // ======================================================================
@@ -1088,6 +1269,75 @@ async function doBackup() {
   const name = `kanakku-backup-${todayISO()}.json`;
   if (saveFile(name, JSON.stringify(D()), 'application/json')) await store.setMeta('lastBackup', new Date().toISOString());
   render();
+}
+
+// ---------- Google Drive backup
+const monthOf = (iso) => (iso || '').slice(0, 7);
+function backupName() { return `kanakku-backup-${todayISO()}.json`; }
+
+async function driveShare() {
+  await store.flush();
+  const name = backupName();
+  const text = JSON.stringify(D());
+  if (isNative()) {
+    const r = window.KanakkuNative.shareFile(name, b64(new TextEncoder().encode(text)), 'application/json');
+    if (r.startsWith('ERR:')) return toast('Could not share: ' + r.slice(4));
+  } else if (navigator.canShare?.({ files: [new File([text], name)] })) {
+    navigator.share({ files: [new File([text], name, { type: 'application/json' })] }).catch(() => {});
+  } else { saveFile(name, text, 'application/json'); }
+  D().settings.drive ||= {};
+  D().settings.drive.last = new Date().toISOString();
+  store.save();
+  await store.setMeta('lastBackup', new Date().toISOString());
+}
+
+let driveSilent = false;
+async function driveUpload(silent) {
+  if (!isNative()) return toast('Automatic Drive backup works in the Android app');
+  await store.flush();
+  driveSilent = !!silent;
+  window.KanakkuNative.driveUpload(backupName(), b64(new TextEncoder().encode(JSON.stringify(D()))));
+  if (!silent) toast('Uploading to Google Drive…');
+}
+
+window.kanakkuDriveResult = (r) => {
+  const dr = (D().settings.drive ||= {});
+  if (r.op === 'connect') {
+    if (r.ok) { dr.mode = 'auto'; dr.account = r.account || dr.account; store.save(); render(); toast('Google Drive connected'); driveUpload(false); }
+    else { toast(r.msg || 'Could not connect Google Drive'); }
+    return;
+  }
+  if (r.ok) {
+    dr.last = new Date().toISOString(); store.save(); store.setMeta('lastBackup', dr.last);
+    if (!driveSilent) toast('Backup saved to Google Drive'); render();
+  } else {
+    toast('Drive backup failed', { label: 'Retry', fn: () => driveUpload(false) });
+    console.warn(r.msg);
+  }
+};
+
+function driveModeSheet() {
+  const dr = (D().settings.drive ||= {});
+  const opt = (k, title, text) => `<button class="radio-row ${(dr.mode || 'off') === k ? 'on' : ''}" data-a="setDriveMode" data-k="${k}"><i></i><div><b>${title}</b><span>${text}</span></div></button>`;
+  openSheet({
+    title: 'Monthly Drive backup',
+    render: () => `<div class="list">
+      ${opt('off', 'Off', 'Back up yourself from Settings whenever you like.')}
+      ${opt('remind', 'Remind me (one tap)', 'On the first day you open Kanakku each month, it asks you to share the backup to Google Drive.')}
+      ${opt('auto', 'Automatic', `Uploads a backup to “Kanakku Backups” in your Google Drive the first time you open Kanakku each month. ${dr.account ? 'Connected: ' + esc(dr.account) : 'You will be asked to choose your Google account once.'}`)}
+    </div>
+    ${dr.mode === 'auto' ? `<div class="sp"></div><button class="btn ghost block" data-a="driveNow">${icon('upload')} Upload a backup now</button>` : ''}
+    <p class="small muted">Kanakku only goes online for this upload. It can only see the files it creates in your Drive.</p>`,
+  });
+}
+
+function monthlyBackupCheck() {
+  const dr = D().settings.drive || {};
+  if (!dr.mode || dr.mode === 'off') return false;
+  if (monthOf(dr.last) === monthOf(todayISO())) return false;
+  if (dr.mode === 'auto' && isNative()) { driveUpload(true); return true; }
+  if (dr.mode === 'remind') { setTimeout(() => toast('Time for your monthly backup', { label: 'Save to Drive', fn: driveShare }), 1200); return true; }
+  return false;
 }
 
 async function doRestore() {
@@ -1201,21 +1451,25 @@ function showLock({ mode = 'unlock', onDone }) {
   let pin = '', first = null;
   const el = document.createElement('div');
   el.className = 'lock';
+  const bio = mode === 'unlock' && D().settings.bio && isNative() && window.KanakkuNative.bioAvailable?.();
   const title = () => mode === 'unlock' ? 'Enter PIN' : first ? 'Confirm new PIN' : 'Choose a 4-digit PIN';
+  const unlock = () => { el.remove(); window.kanakkuBioResult = null; onDone?.(); };
+  if (bio) window.kanakkuBioResult = (ok) => { if (ok) unlock(); };
   const draw = () => {
     el.innerHTML = `<img src="icon-512.png" width="64" height="64" style="border-radius:18px" alt=""><h2>${title()}</h2>
       <div class="pins">${[0, 1, 2, 3].map(i => `<i class="${i < pin.length ? 'f' : ''}"></i>`).join('')}</div>
-      <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, mode === 'unlock' ? '' : '✕', 0, '⌫'].map(k => `<button data-k="${k}" ${k === '' ? 'style="visibility:hidden"' : ''}>${k}</button>`).join('')}</div>`;
+      <div class="keypad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, mode === 'unlock' ? (bio ? 'bio' : '') : '✕', 0, '⌫'].map(k => k === 'bio' ? `<button data-k="bio" aria-label="Fingerprint">👆</button>` : `<button data-k="${k}" ${k === '' ? 'style="visibility:hidden"' : ''}>${k}</button>`).join('')}</div>`;
   };
   el.addEventListener('click', async (e) => {
     const k = e.target.closest('button')?.dataset.k;
     if (k == null) return;
     if (k === '✕') { el.remove(); return; }
+    if (k === 'bio') { window.KanakkuNative.bioAuth(); return; }
     if (k === '⌫') pin = pin.slice(0, -1); else if (pin.length < 4) pin += k;
     draw();
     if (pin.length === 4) {
       if (mode === 'unlock') {
-        if (await sha(pin) === D().settings.pinHash) { el.remove(); onDone?.(); }
+        if (await sha(pin) === D().settings.pinHash) unlock();
         else { el.querySelector('.pins').classList.add('shake'); setTimeout(() => { pin = ''; draw(); }, 350); }
       } else if (!first) { first = pin; pin = ''; setTimeout(draw, 120); }
       else if (first === pin) { D().settings.pinHash = await sha(pin); store.save(); el.remove(); toast('App lock is on'); render(); }
@@ -1224,6 +1478,7 @@ function showLock({ mode = 'unlock', onDone }) {
   });
   draw();
   document.body.appendChild(el);
+  if (bio) setTimeout(() => window.KanakkuNative.bioAuth(), 250);
 }
 let hiddenAt = 0;
 document.addEventListener('visibilitychange', () => {
@@ -1241,7 +1496,7 @@ const actions = {
   go: (d) => { const top = ui.stack[ui.stack.length - 1]; if (top) top.scroll = window.scrollY; ui.stack.push({ v: d.v, id: d.id }); render(); },
   back: () => goBack(),
   toggleHide: () => { ui.hide = !ui.hide; render(); },
-  goAct: (d) => { Object.assign(ui.act, { type: d.type || 'all', month: d.month || '', cat: d.cat || '', acc: '', person: '', q: '', limit: 150 }); ui.stack = []; ui.tab = 'activity'; render(); },
+  goAct: (d) => { Object.assign(ui.act, { type: d.type || 'all', month: d.month || '', cat: d.cat || '', acc: '', person: '', project: '', q: '', limit: 150 }); ui.stack = []; ui.tab = 'activity'; render(); },
   actType: (d) => { ui.act.type = d.k; ui.act.limit = 150; render(); },
   clearF: (d) => { ui.act[d.k] = ''; render(); },
   more: () => { ui.act.limit += 300; render(); },
@@ -1255,6 +1510,7 @@ const actions = {
     if (d.person) { init.person = d.person; }
     if (d.kuri) init.kuri = d.kuri;
     if (d.asset) init.asset = d.asset;
+    if (d.project) init.project = d.project;
     if (d.type === 'transfer' && d.acc) init.to = D().accounts.find(a => a.id !== d.acc && !a.closed)?.id;
     txnForm(init);
   },
@@ -1314,6 +1570,27 @@ const actions = {
   },
   skipRec: (d) => { const r = D().recurring.find(x => x.id === d.id); r.next = addMonths(r.next, 1, r.day); store.save(); render(); toast('Skipped this month'); },
   repMode: (d) => { ui.report.mode = d.k; render(); },
+  repCur: (d) => { ui.report.cur = d.k; render(); },
+  editProject: (d) => editProject(d.id),
+  assetToProject: (d) => assetToProject(d.id),
+  zYear: (d) => { ui.zakatYear = d.k; const top = ui.stack[ui.stack.length - 1]; if (top) top.id = d.k; render(); },
+  zInc: (d) => { const st = yearState(ui.zakatYear); if (st.locked) return toast('Unlock the year to change this'); st.include[d.k] = !st.include[d.k]; store.save(); render(); },
+  zPay: (d) => { const cat = ensureZakatCat(); store.save(); txnForm({ type: 'expense', cat, zakatYear: d.k }); },
+  zGold: (d) => {
+    const st = yearState(d.k);
+    formSheet({ title: `Gold price · ${d.k}`, values: { gold: st.goldPrice ?? '', rate: st.rate ?? rate() },
+      fields: [
+        { type: 'note', text: () => 'Price of 1 gram of 24K gold in AED on 31 December. Nisab = 85 g × this price.' },
+        { key: 'gold', label: 'Gold price per gram (AED)', type: 'number' },
+        { key: 'rate', label: 'AED → INR rate (only for the nisab check)', type: 'number' },
+      ],
+      onSave: (v) => { const g = evalAmount(v.gold); if (!(g > 0)) return 'Enter the gold price'; st.goldPrice = g; const r = evalAmount(v.rate); if (r > 0) st.rate = r; } });
+  },
+  zLock: (d) => {
+    const st = yearState(d.k);
+    if (st.locked) { unlockYear(d.k); store.save(); render(); toast('Unlocked – showing live balances'); return; }
+    confirmSheet(`Finalise zakat ${d.k}?`, 'The amounts are saved as they are now, so later edits to old entries will not change this year’s zakat. You can unlock it any time.', 'Finalise', () => { lockYear(d.k); store.save(); render(); toast('Zakat ' + d.k + ' finalised'); }, false);
+  },
   repNav: (d) => {
     const r = ui.report;
     if (r.mode === 'month') r.ym = addMonths(r.ym + '-01', +d.d, 1).slice(0, 7);
@@ -1323,6 +1600,22 @@ const actions = {
   repMonth: (d) => { ui.report.mode = 'month'; ui.report.ym = d.ym; render(); },
   editRate: () => formSheet({ title: 'INR rate', values: { rate: rate() }, fields: [{ key: 'rate', label: '1 AED = ₹', type: 'number' }, { type: 'note', text: () => 'Used to show INR balances in AED totals and as the starting rate for new INR entries. Each AED→INR transfer you record with both amounts updates it automatically.' }], onSave: (v) => { const r = evalAmount(v.rate); if (!(r > 0)) return 'Enter a rate'; D().settings.inrRate = r; } }),
   backup: () => doBackup(),
+  driveShare: () => driveShare(),
+  driveMode: () => driveModeSheet(),
+  driveNow: () => { closeSheet(); driveUpload(false); },
+  setDriveMode: (d) => {
+    const dr = (D().settings.drive ||= {});
+    if (d.k === 'auto' && dr.mode !== 'auto') {
+      if (!isNative()) return toast('Automatic Drive backup works in the Android app');
+      closeSheet(); toast('Opening Google sign-in…'); window.KanakkuNative.driveConnect(); return;
+    }
+    dr.mode = d.k; store.save(); refreshSheet(); render();
+  },
+  toggleBio: () => {
+    const s = D().settings;
+    if (!s.pinHash) return toast('Turn on App lock (PIN) first');
+    s.bio = !s.bio; store.save(); render(); toast(s.bio ? 'Fingerprint unlock is on' : 'Fingerprint unlock is off');
+  },
   restore: () => doRestore(),
   importVyapar: () => importVyaparSheet(false),
   vyPick: async () => { const s = topSheet(); const f = await pickFile(); if (f) { s.st.vyb = f; refreshSheet(); } },
@@ -1330,7 +1623,7 @@ const actions = {
   vyGo: () => runVyaparImport(topSheet().st),
   exportCsv: () => exportCsv(),
   setPin: () => {
-    if (D().settings.pinHash) confirmSheet('App lock', 'Turn off the PIN or choose a new one.', 'Turn off', () => { delete D().settings.pinHash; store.save(); render(); toast('App lock is off'); }, true);
+    if (D().settings.pinHash) confirmSheet('App lock', 'Turn off the PIN or choose a new one.', 'Turn off', () => { delete D().settings.pinHash; delete D().settings.bio; store.save(); render(); toast('App lock is off'); }, true);
     else showLock({ mode: 'set' });
   },
   theme: () => {
@@ -1355,11 +1648,12 @@ function filterSheet() {
       <div class="field"><div class="lbl">Month</div><select class="input" data-in="flt" data-k="month"><option value="">All time</option>${months.map(mo => `<option value="${mo}" ${st.month === mo ? 'selected' : ''}>${fmtMonth(mo)}</option>`).join('')}</select></div>
       <div class="field"><div class="lbl">Account</div><select class="input" data-in="flt" data-k="acc"><option value="">All accounts</option>${D().accounts.map(a => `<option value="${a.id}" ${st.acc === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></div>
       <div class="field"><div class="lbl">Category</div><select class="input" data-in="flt" data-k="cat"><option value="">All categories</option>${D().categories.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${st.cat === c.id ? 'selected' : ''}>${c.kind === 'income' ? '↓ ' : ''}${esc(c.name)}</option>`).join('')}</select></div>
+      ${D().projects.length ? `<div class="field"><div class="lbl">Project</div><select class="input" data-in="flt" data-k="project"><option value="">Any</option>${D().projects.map(p => `<option value="${p.id}" ${st.project === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
       <div class="field"><div class="lbl">Person</div><select class="input" data-in="flt" data-k="person"><option value="">Anyone</option>${[...D().people].sort((a, b) => a.name.localeCompare(b.name)).map(p => `<option value="${p.id}" ${st.person === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>`,
     foot: () => `<button class="btn ghost" data-a="fltClear">Clear</button><button class="btn primary" data-a="closeSheet">Show results</button>`,
   });
 }
-actions.fltClear = () => { Object.assign(ui.act, { month: '', acc: '', cat: '', person: '', type: 'all', q: '' }); closeSheet(); render(); };
+actions.fltClear = () => { Object.assign(ui.act, { month: '', acc: '', cat: '', person: '', project: '', type: 'all', q: '' }); closeSheet(); render(); };
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-a]');
@@ -1433,6 +1727,7 @@ async function start() {
   if (D().settings.pinHash) showLock({});
   const lb = await store.getMeta('lastBackup');
   const days = lb ? (Date.now() - Date.parse(lb)) / 864e5 : 999;
+  if (monthlyBackupCheck()) return;
   if (days > 7 && D().txns.length > 20) setTimeout(() => toast(lb ? 'It has been a week since your last backup' : 'Save a backup to keep your data safe', { label: 'Back up', fn: doBackup }), 1200);
 }
 

@@ -74,7 +74,13 @@ function migrate(d) {
   d.settings ||= {};
   d.settings.baseCur ||= 'AED';
   d.settings.inrRate ||= 24;
-  for (const k of ['accounts', 'categories', 'people', 'kuris', 'assets', 'recurring', 'txns']) d[k] ||= [];
+  for (const k of ['accounts', 'categories', 'people', 'kuris', 'assets', 'recurring', 'txns', 'projects']) d[k] ||= [];
+  d.zakat ||= { years: {} };
+  d.zakat.years ||= {};
+  for (const a of d.assets) {
+    if (!a.values) { a.values = {}; if (a.value != null && a.value !== '') a.values[a.cur || 'AED'] = Number(a.value); }
+    delete a.value;
+  }
 }
 
 export const newId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -86,6 +92,7 @@ export const catOf = (id) => byId(store.data.categories, id);
 export const personOf = (id) => byId(store.data.people, id);
 export const kuriOf = (id) => byId(store.data.kuris, id);
 export const assetOf = (id) => byId(store.data.assets, id);
+export const projectOf = (id) => byId(store.data.projects, id);
 
 // ---------- Type metadata
 export const TYPES = {
@@ -105,13 +112,13 @@ export const TYPES = {
 };
 
 // ---------- Money helpers
+// Amounts are never converted between AED and INR for totals; each currency is kept on its own.
+export const CURS = ['AED', 'INR'];
 export const rate = () => Number(store.data.settings.inrRate) || 24;
-/** Value of a transaction's main amount in AED. */
-export function toAED(amt, cur, fx) {
-  if (cur === 'INR') return amt / (fx || rate());
-  return amt;
-}
-export const tAED = (t) => toAED(t.amt, t.cur, t.fx);
+export const zero = () => ({ AED: 0, INR: 0 });
+export const addTo = (o, cur, v) => { o[cur] = (o[cur] || 0) + v; return o; };
+export const r2 = (n) => Math.round(n * 100) / 100;
+export function toAED(amt, cur, fx) { return cur === 'INR' ? amt / (fx || rate()) : amt; }
 
 /** Signed effect of t on account id. */
 export function effectOn(t, accountId) {
@@ -126,10 +133,12 @@ export function effectOn(t, accountId) {
   return (TYPES[t.type]?.dir || 0) * t.amt;
 }
 
-export function accountBalances() {
+/** Account balances, optionally as of the end of a date (inclusive). */
+export function accountBalances(upto) {
   const b = {};
   for (const a of store.data.accounts) b[a.id] = Number(a.opening) || 0;
   for (const t of store.data.txns) {
+    if (upto && t.date > upto) continue;
     if (t.type === 'transfer') {
       if (t.acc in b) b[t.acc] -= t.amt;
       if (t.to in b) b[t.to] += (t.amt2 ?? t.amt);
@@ -137,7 +146,7 @@ export function accountBalances() {
       b[t.acc] += t.type === 'adjust' ? t.amt : (TYPES[t.type]?.dir || 0) * t.amt;
     }
   }
-  for (const k in b) b[k] = Math.round(b[k] * 100) / 100;
+  for (const k in b) b[k] = r2(b[k]);
   return b;
 }
 
@@ -148,72 +157,108 @@ export function personLedger(pid) {
   return store.data.txns.filter(t => t.person === pid && ['lend', 'collect', 'borrow', 'repay', 'person_adjust'].includes(t.type));
 }
 const PSIGN = { lend: 1, repay: 1, collect: -1, borrow: -1, person_adjust: 1 };
-/** Map personId -> {AED: n, INR: n}. Positive = they owe you. */
-export function peopleBalances() {
+/** Map personId -> {AED, INR}. Positive = they owe you. */
+export function peopleBalances(upto) {
   const m = new Map();
   for (const t of store.data.txns) {
     const s = PSIGN[t.type];
     if (!s || !t.person) continue;
+    if (upto && t.date > upto) continue;
     const { amt, cur } = side(t);
-    const e = m.get(t.person) || { AED: 0, INR: 0 };
+    const e = m.get(t.person) || zero();
     e[cur] = (e[cur] || 0) + s * amt;
     m.set(t.person, e);
   }
-  for (const e of m.values()) for (const k in e) e[k] = Math.round(e[k] * 100) / 100;
+  for (const e of m.values()) for (const k in e) e[k] = r2(e[k]);
   return m;
 }
+/** Used only for sorting / deciding owes-vs-owed when a person has both currencies. */
 export function personAED(e) { return (e?.AED || 0) + (e?.INR || 0) / rate(); }
+export const isZero = (o) => CURS.every(c => Math.abs(o?.[c] || 0) < 0.005);
 
 export function kuriSummary(kid) {
-  let paid = 0, got = 0, n = 0; const list = [];
+  const paid = zero(), got = zero(); let n = 0; const list = [];
   for (const t of store.data.txns) {
     if (t.kuri !== kid) continue;
     list.push(t);
-    const v = toAED(side(t).amt, side(t).cur, t.fx);
-    if (t.type === 'kuri_pay') { paid += v; n++; } else if (t.type === 'kuri_get') got += v;
+    const s = side(t);
+    if (t.type === 'kuri_pay') { addTo(paid, s.cur, s.amt); n++; } else if (t.type === 'kuri_get') addTo(got, s.cur, s.amt);
   }
-  return { paid, got, net: paid - got, count: n, list };
+  const net = { AED: paid.AED - got.AED, INR: paid.INR - got.INR };
+  return { paid, got, net, count: n, list };
 }
 
-export function assetSummary(sid) {
-  let invested = 0, returned = 0; const list = [];
+export function assetSummary(sid, upto) {
+  const invested = zero(), returned = zero(); const list = [];
   for (const t of store.data.txns) {
     if (t.asset !== sid) continue;
+    if (upto && t.date > upto) continue;
     list.push(t);
-    const v = toAED(side(t).amt, side(t).cur, t.fx);
-    if (t.type === 'invest') invested += v; else if (t.type === 'asset_in') returned += v;
+    const s = side(t);
+    if (t.type === 'invest') addTo(invested, s.cur, s.amt); else if (t.type === 'asset_in') addTo(returned, s.cur, s.amt);
   }
   const a = assetOf(sid);
-  const net = invested - returned;
-  const value = a?.value != null && a.value !== '' ? toAED(Number(a.value), a.cur || 'AED') : net;
-  return { invested, returned, net, value, gain: value - net, list };
+  const net = { AED: invested.AED - returned.AED, INR: invested.INR - returned.INR };
+  const value = {};
+  const hasValue = {};
+  for (const c of CURS) {
+    const v = a?.values?.[c];
+    hasValue[c] = v != null && v !== '';
+    value[c] = hasValue[c] ? Number(v) : net[c];
+  }
+  const gain = { AED: value.AED - net.AED, INR: value.INR - net.INR };
+  return { invested, returned, net, value, hasValue, gain, list };
 }
 
-export function netWorth() {
-  const bal = accountBalances();
-  let cash = 0, cards = 0;
-  for (const a of store.data.accounts) {
-    if (a.closed && Math.abs(bal[a.id]) < 0.01) continue;
-    const v = toAED(bal[a.id], a.cur);
-    if (a.kind === 'card') cards += v; else cash += v;
+export function projectSummary(pid) {
+  const spent = zero(); const list = []; const byCat = new Map();
+  for (const t of store.data.txns) {
+    if (t.project !== pid) continue;
+    list.push(t);
+    const v = TYPES[t.type]?.dir === 1 ? -t.amt : t.amt;
+    addTo(spent, t.cur, v);
+    const k = t.cat || t.type;
+    byCat.set(k, addTo(byCat.get(k) || zero(), t.cur, v));
   }
-  let owed = 0, owe = 0;
-  for (const e of peopleBalances().values()) { const v = personAED(e); if (v > 0) owed += v; else owe -= v; }
-  let assets = 0; for (const s of store.data.assets) assets += assetSummary(s.id).value;
-  let kuri = 0; for (const k of store.data.kuris) if (k.status !== 'closed') kuri += Math.max(0, kuriSummary(k.id).net);
-  return { cash, cards, owed, owe, assets, kuri, total: cash + cards + owed - owe + assets + kuri };
+  return { spent, list, byCat };
+}
+
+/** Net worth per currency, optionally as of a date. Kuri is shown separately (not wealth). */
+export function netWorth(upto) {
+  const bal = accountBalances(upto);
+  const out = {};
+  for (const c of CURS) out[c] = { cash: 0, cards: 0, owed: 0, owe: 0, assets: 0, total: 0 };
+  for (const a of store.data.accounts) {
+    const o = out[a.cur || 'AED'];
+    if (a.kind === 'card') o.cards += bal[a.id]; else o.cash += bal[a.id];
+  }
+  for (const e of peopleBalances(upto).values()) for (const c of CURS) { const v = e[c] || 0; if (v > 0) out[c].owed += v; else out[c].owe -= v; }
+  for (const s of store.data.assets) { const v = assetSummary(s.id, upto).value; for (const c of CURS) out[c].assets += v[c]; }
+  for (const c of CURS) { const o = out[c]; o.total = o.cash + o.cards + o.owed - o.owe + o.assets; }
+  return out;
+}
+
+export function kuriTotals() {
+  const net = zero();
+  for (const k of store.data.kuris) if (k.status !== 'closed') { const s = kuriSummary(k.id).net; for (const c of CURS) net[c] += Math.max(0, s[c]); }
+  return net;
 }
 
 export const monthKey = (d) => d.slice(0, 7);
-export function monthTotals(month) {
-  let spent = 0, earned = 0; const byCat = new Map();
+/** Spending/earning for a period prefix ('2026-10' or '2026'), per currency. */
+export function periodTotals(prefix) {
+  const out = {};
+  for (const c of CURS) out[c] = { spent: 0, earned: 0, byCat: new Map(), incCat: new Map() };
   for (const t of store.data.txns) {
-    if (!t.date.startsWith(month)) continue;
-    if (t.type === 'expense') { const v = tAED(t); spent += v; byCat.set(t.cat, (byCat.get(t.cat) || 0) + v); }
-    else if (t.type === 'income') earned += tAED(t);
+    if (!t.date.startsWith(prefix)) continue;
+    const o = out[t.cur || 'AED'];
+    if (!o) continue;
+    if (t.type === 'expense') { o.spent += t.amt; o.byCat.set(t.cat, (o.byCat.get(t.cat) || 0) + t.amt); }
+    else if (t.type === 'income') { o.earned += t.amt; o.incCat.set(t.cat, (o.incCat.get(t.cat) || 0) + t.amt); }
   }
-  return { spent, earned, byCat };
+  return out;
 }
+export const monthTotals = periodTotals;
 
 // ---------- Formatting
 const fmtAED = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
@@ -223,7 +268,7 @@ export function money(n, cur = 'AED', opts = {}) {
   const abs = Math.abs(v);
   const f = cur === 'INR' ? fmtINR : fmtAED;
   let s = opts.short && abs >= 10000 ? shortNum(abs, cur) : f.format(Math.round(abs * 100) / 100);
-  const sym = cur === 'INR' ? '₹' : 'AED ';
+  const sym = opts.nosym ? '' : cur === 'INR' ? '₹' : 'AED ';
   const sign = v < 0 ? '−' : opts.plus && v > 0 ? '+' : '';
   return `${sign}${sym}${s}`;
 }
@@ -234,6 +279,12 @@ function shortNum(n, cur) {
   }
   if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
   return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+}
+
+/** Format a {AED, INR} object, skipping zero currencies. */
+export function multi(o, opts = {}) {
+  const parts = CURS.filter(c => Math.abs(o?.[c] || 0) >= 0.005).map(c => money(opts.abs ? Math.abs(o[c]) : o[c], c, opts));
+  return parts.length ? parts.join(opts.sep || ' · ') : money(0, opts.cur || 'AED');
 }
 
 export const todayISO = () => {

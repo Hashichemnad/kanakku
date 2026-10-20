@@ -11,6 +11,9 @@
   "license": "ISC",
   "dependencies": {
     "@fontsource-variable/manrope": "^5.1.0",
+    "@fontsource/baloo-chettan-2": "^5.1.0",
+    "@fontsource/manjari": "^5.1.0",
+    "@fontsource/noto-sans-malayalam": "^5.1.0",
     "fflate": "^0.8.2",
     "sql.js": "^1.10.3"
   },
