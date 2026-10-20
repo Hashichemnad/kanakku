@@ -1320,7 +1320,7 @@ async function statementImage(pid) {
   const { p, e, v, pendG, pendB } = statementData(pid);
   const W = 1080, pad = 64;
   const rows = [...pendG.map(l => ({ l, k: 'given' })), ...pendB.map(l => ({ l, k: 'borrowed' }))];
-  const H = 520 + rows.length * 132 + 220;
+  const H = 480 + Math.max(1, rows.length) * 132 + 130;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const g = c.getContext('2d');
   const font = (w, s) => `${w} ${s}px Manrope, system-ui, sans-serif`;
