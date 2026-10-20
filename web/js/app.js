@@ -1,7 +1,7 @@
 import {
   store, emptyData, newId, acc, catOf, personOf, kuriOf, assetOf, projectOf, TYPES, rate, toAED, side,
   accountBalances, peopleBalances, personAED, personLedger, kuriSummary, assetSummary, netWorth, periodTotals,
-  projectSummary, kuriTotals, CURS, zero, addTo, isZero, multi,
+  projectSummary, kuriTotals, CURS, zero, addTo, isZero, multi, personLoans, PERSON_TYPES,
   money, todayISO, fmtDate, fmtMonth, evalAmount, addMonths, dueRecurring, addDays, effectOn, MONTH_NAMES,
 } from './store.js';
 import { icon } from './icons.js';
@@ -66,7 +66,7 @@ function describe(t, ctx = {}) {
       if (t.cur !== (to?.cur || t.cur)) out.sub.push(`${money(t.amt2, to.cur)} received`);
       break;
     }
-    case 'lend': case 'collect': case 'borrow': case 'repay': case 'person_adjust': {
+    case 'lend': case 'collect': case 'borrow': case 'repay': case 'waive': case 'waived': case 'person_adjust': {
       const p = personOf(t.person);
       out.icon = `<b style="font-size:14px">${esc(initials(p?.name))}</b>`;
       out.title = ctx.inPerson ? TYPES[t.type].label : `${TYPES[t.type].label} · ${p?.name || '?'}`;
@@ -85,7 +85,7 @@ function describe(t, ctx = {}) {
   // amount sign from the point of view of the context
   let signed;
   if (ctx.inAccount) signed = effectOn(t, ctx.inAccount);
-  else if (t.type === 'transfer' || t.type === 'person_adjust') signed = null;
+  else if (t.type === 'transfer' || t.type === 'person_adjust' || t.type === 'waive' || t.type === 'waived') signed = null;
   else if (t.type === 'adjust') signed = t.amt;
   else signed = TYPES[t.type].dir * t.amt;
   const cur = ctx.inAccount && t.to === ctx.inAccount && t.type === 'transfer' ? acc(t.to).cur : t.cur;
@@ -390,9 +390,12 @@ function viewPerson(id) {
   if (!p) return viewPeople();
   const e = peopleBalances().get(id) || zero();
   const v = personAED(e);
+  const books = personLoans(id);
+  const pendG = books.given.filter(l => l.pending > 0.004).reverse();
+  const pendB = books.borrowed.filter(l => l.pending > 0.004).reverse();
+  const doneN = books.given.length + books.borrowed.length - pendG.length - pendB.length;
+  const showAll = ui.personAll === id;
   const list = sorted(personLedger(id));
-  const gave = zero(), got = zero();
-  for (const t of list) { const s = side(t); if (t.type === 'lend') addTo(gave, s.cur, s.amt); if (t.type === 'collect') addTo(got, s.cur, s.amt); }
   return `<div class="screen">${topbar(p.name, { back: true, right: `<button class="icon-btn" data-a="editPerson" data-id="${id}">${icon('edit')}</button>` })}
     <div class="detail-hero">
       <div class="ic-big ${v > 0.5 ? 'bg-lend' : v < -0.5 ? 'bg-borrow' : ''}"><b style="font-size:22px">${esc(initials(p.name))}</b></div>
@@ -401,16 +404,18 @@ function viewPerson(id) {
     </div>
     <div class="actions">
       <button data-a="newTxn" data-type="lend" data-person="${id}"><span class="ai bg-lend">${icon('out')}</span>Gave</button>
-      <button data-a="newTxn" data-type="collect" data-person="${id}"><span class="ai bg-lend">${icon('in')}</span>Got back</button>
+      <button data-a="newTxn" data-type="collect" data-person="${id}"><span class="ai bg-in">${icon('in')}</span>Got back</button>
+      <button data-a="newTxn" data-type="${v < -0.5 ? 'waived' : 'waive'}" data-person="${id}"><span class="ai bg-kuri">%</span>Discount</button>
       <button data-a="newTxn" data-type="borrow" data-person="${id}"><span class="ai bg-borrow">${icon('in')}</span>Borrowed</button>
       <button data-a="newTxn" data-type="repay" data-person="${id}"><span class="ai bg-borrow">${icon('out')}</span>Repaid</button>
-      <button data-a="sharePerson" data-id="${id}"><span class="ai bg-move">${icon('share')}</span>Share</button>
     </div>
-    <div class="section card">
-      <div class="kv"><span>Total given</span><span class="num">${multi(gave)}</span></div>
-      <div class="kv"><span>Total got back</span><span class="num">${multi(got)}</span></div>
+    ${!isZero(e) ? `<button class="btn primary block" style="margin-top:12px" data-a="sharePerson" data-id="${id}">${icon('share')} Send statement to ${esc(p.name)}</button>` : ''}
+    ${pendG.length ? `<div class="section"><div class="section-head"><h2>Pending – ${esc(p.name)} has to give</h2></div>${pendG.map(l => loanCard(l, 'given')).join('')}</div>` : ''}
+    ${pendB.length ? `<div class="section"><div class="section-head"><h2>Pending – you have to give</h2></div>${pendB.map(l => loanCard(l, 'borrowed')).join('')}</div>` : ''}
+    ${books.givenExtra?.length || books.borrowedExtra?.length ? `<p class="small muted" style="margin:10px 4px">Some repayments were more than the loans recorded; the extra is counted in the balance above.</p>` : ''}
+    <div class="section"><div class="section-head"><h2>${showAll ? 'All entries' : `Settled loans${doneN ? ` (${doneN})` : ''}`}</h2><button data-a="personAll" data-id="${id}">${showAll ? 'Show loans' : 'All entries'}</button></div>
+      ${showAll ? groupedTxns(list, { inPerson: id }) : [...books.given, ...books.borrowed].filter(l => l.pending <= 0.004).sort((a, b) => b.t.date.localeCompare(a.t.date)).map(l => loanCard(l, books.given.includes(l) ? 'given' : 'borrowed')).join('') || '<div class="list"><div class="empty">No settled loans yet</div></div>'}
     </div>
-    <div class="section">${groupedTxns(list, { inPerson: id })}</div>
   </div>`;
 }
 
@@ -620,14 +625,19 @@ function confirmSheet(title, text, okLabel, fn, danger = true) {
 const FORM_TABS = [
   ['expense', 'Expense'], ['income', 'Income'], ['transfer', 'Transfer'], ['loan', 'Loan'], ['kuri', 'Kuri'], ['invest', 'Invest'],
 ];
-const GROUP_OF = { expense: 'expense', income: 'income', transfer: 'transfer', adjust: 'transfer', lend: 'loan', collect: 'loan', borrow: 'loan', repay: 'loan', person_adjust: 'loan', kuri_pay: 'kuri', kuri_get: 'kuri', invest: 'invest', asset_in: 'invest' };
+const GROUP_OF = { expense: 'expense', income: 'income', transfer: 'transfer', adjust: 'transfer', lend: 'loan', collect: 'loan', borrow: 'loan', repay: 'loan', waive: 'loan', waived: 'loan', person_adjust: 'loan', kuri_pay: 'kuri', kuri_get: 'kuri', invest: 'invest', asset_in: 'invest' };
 const SUBTYPES = {
-  loan: [['lend', 'I gave'], ['collect', 'Got back'], ['borrow', 'I borrowed'], ['repay', 'I repaid']],
+  loan: [['lend', 'I gave'], ['collect', 'Got back'], ['waive', 'Discount'], ['borrow', 'I borrowed'], ['repay', 'I repaid'], ['waived', 'They let go']],
   kuri: [['kuri_pay', 'Paid instalment'], ['kuri_get', 'Got payout']],
   invest: [['invest', 'Invested'], ['asset_in', 'Got back / return']],
 };
 
 let lastAccount = null;
+function defaultAccountFor(cur) {
+  const d = defaultAccount();
+  if (acc(d)?.cur === cur) return d;
+  return D().accounts.find(a => !a.closed && a.cur === cur && a.kind !== 'card')?.id || d;
+}
 function defaultAccount() {
   if (lastAccount && acc(lastAccount) && !acc(lastAccount).closed) return lastAccount;
   const recent = sorted(D().txns).find(t => t.acc && acc(t.acc) && !acc(t.acc).closed);
@@ -709,7 +719,7 @@ function formBody(f, editing) {
   if (f.type !== 'adjust' && f.type !== 'person_adjust') {
     html += `<div class="type-tabs">${FORM_TABS.map(([k, l]) => `<button class="${group === k ? 'on' : ''}" data-a="fgroup" data-k="${k}">${l}</button>`).join('')}</div>`;
   }
-  if (SUBTYPES[group]) html += `<div class="sp"></div><div class="seg">${SUBTYPES[group].map(([k, l]) => `<button class="${f.type === k ? 'on' : ''}" data-a="fset" data-k="type" data-v="${k}">${l}</button>`).join('')}</div>`;
+  if (SUBTYPES[group]) html += `<div class="sp"></div><div class="seg ${group === 'loan' ? 'wrap' : ''}">${SUBTYPES[group].map(([k, l]) => `<button class="${f.type === k ? 'on' : ''}" data-a="fset" data-k="type" data-v="${k}">${l}</button>`).join('')}</div>`;
 
   html += `<div class="sp"></div><div class="amount-box"><span class="cur">${cur === 'INR' ? '₹' : 'AED'}</span>
     <input id="amt" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(f.amtStr)}" data-in="famt">
@@ -729,7 +739,10 @@ function formBody(f, editing) {
     html += `<p class="small muted">A correction changes the balance without counting as income or expense. Use a minus sign to reduce.</p>`;
   } else if (group === 'loan') {
     html += entityPicker(f, 'person', 'Person', D().people, 'pickPerson');
-    if (f.type !== 'person_adjust') html += accPicker(f, 'acc', ['lend', 'repay'].includes(f.type) ? 'Paid from' : 'Received into', { none: true });
+    const isDisc = f.type === 'waive' || f.type === 'waived';
+    if (isDisc) html += `<p class="small muted" style="margin:10px 4px 0">${f.type === 'waive' ? 'You let go of this amount – it reduces what they owe you. No money moves and it is not counted as spending.' : 'They let go of this amount – it reduces what you owe them.'}</p>`;
+    if (f.type !== 'person_adjust' && !isDisc) html += accPicker(f, 'acc', ['lend', 'repay'].includes(f.type) ? 'Paid from' : 'Received into', { none: true });
+    if (['collect', 'waive', 'repay', 'waived'].includes(f.type)) html += loanAgainstPicker(f);
     if (!f.acc) html += `<div class="field"><div class="lbl">Currency</div><div class="seg">${['AED', 'INR'].map(c => `<button class="${(f.cur || 'AED') === c ? 'on' : ''}" data-a="fset" data-k="cur" data-v="${c}">${c}</button>`).join('')}</div></div>`;
   } else if (group === 'kuri') {
     html += entityPicker(f, 'kuri', 'Kuri', D().kuris.filter(k => k.status !== 'closed' || k.id === f.kuri), 'pickKuri');
@@ -799,7 +812,13 @@ function saveTxn(sheet) {
     if (f.project) t.project = f.project;
     if (f.type === 'expense' && zakatCats().includes(f.cat) && f.zakatYear) t.zakatYear = String(f.zakatYear);
   }
-  if (group === 'loan') { if (!f.person) return toast('Choose a person'); t.person = f.person; if (!t.acc) t.cur = f.cur || 'AED'; }
+  if (group === 'loan') {
+    if (!f.person) return toast('Choose a person');
+    t.person = f.person;
+    if (f.type === 'waive' || f.type === 'waived') { delete t.acc; delete t.fx; }
+    if (!t.acc) t.cur = f.cur || 'AED';
+    if (f.against && ['collect', 'waive', 'repay', 'waived'].includes(f.type)) t.against = f.against;
+  }
   if (group === 'kuri') { if (!f.kuri) return toast('Choose a kuri'); t.kuri = f.kuri; }
   if (group === 'invest') { if (!f.asset) return toast('Choose an investment'); t.asset = f.asset; if (f.sub) t.sub = f.sub; }
   // keep AED ledger value for imported entries if amount unchanged
@@ -1235,6 +1254,130 @@ function assetToProject(id) {
   }, false);
 }
 
+function loanCard(l, kind) {
+  const open = ui.openLoan === l.t.id;
+  const pct = l.amt ? Math.min(100, (l.back + l.waived) / l.amt * 100) : 0;
+  const done = l.pending <= 0.004;
+  const what = l.opening ? 'Balance from before' : kind === 'given' ? 'You gave' : 'You borrowed';
+  return `<div class="loan ${done ? 'done' : ''}">
+    <button class="loan-top" data-a="toggleLoan" data-id="${l.t.id}">
+      <div class="grow"><div class="t">${what} ${money(l.amt, l.cur)}</div><div class="d">${fmtDate(l.t.date, true)}${l.t.note ? ' · ' + esc(l.t.note.split('\n')[0]) : ''}</div></div>
+      <div class="right"><div class="num ${done ? 'c-in' : kind === 'given' ? 'c-lend' : 'c-borrow'}" style="font-weight:800">${done ? '✓ Settled' : money(l.pending, l.cur)}</div><div class="d">${done ? fmtDate(l.closedOn, true) : 'pending'}</div></div>
+    </button>
+    <div class="bar"><i style="width:${pct}%;background:${done ? 'var(--in)' : kind === 'given' ? 'var(--lend)' : 'var(--borrow)'}"></i></div>
+    ${open ? `<div class="loan-detail">
+      <div class="kv"><span>${kind === 'given' ? 'Given' : 'Borrowed'} · ${fmtDate(l.t.date, true)}</span><span class="num">${money(l.amt, l.cur)}</span></div>
+      ${l.settles.map(s => `<button class="kv" style="width:100%" data-a="editTxn" data-id="${s.t.id}"><span>${s.t.type === 'waive' || s.t.type === 'waived' ? 'Discount' : kind === 'given' ? 'Got back' : 'Repaid'} · ${fmtDate(s.t.date, true)}${s.t.against ? '' : ' <span class="muted small">(auto)</span>'}</span><span class="num ${s.t.type.startsWith('waive') ? 'c-kuri' : 'c-in'}">− ${money(s.amt, l.cur)}</span></button>`).join('')}
+      <div class="kv"><span>Pending</span><span class="num">${money(l.pending, l.cur)}</span></div>
+      <div class="flex" style="gap:8px;margin-top:8px">
+        <button class="btn ghost grow" data-a="editTxn" data-id="${l.t.id}">${icon('edit')} Edit</button>
+        ${!done ? `<button class="btn ghost grow" data-a="newTxn" data-type="${kind === 'given' ? 'waive' : 'waived'}" data-person="${l.t.person}" data-against="${l.t.id}">% Discount</button>
+        <button class="btn primary grow" data-a="newTxn" data-type="${kind === 'given' ? 'collect' : 'repay'}" data-person="${l.t.person}" data-against="${l.t.id}">${kind === 'given' ? 'Got back' : 'Repay'}</button>` : ''}
+      </div>
+    </div>` : ''}
+  </div>`;
+}
+
+function loanAgainstPicker(f) {
+  if (!f.person) return '';
+  const kind = ['collect', 'waive'].includes(f.type) ? 'given' : 'borrowed';
+  const books = personLoans(f.person);
+  const cur = f.acc ? curOf(f) : (f.cur || 'AED');
+  const pend = books[kind].filter(l => (l.pending > 0.004 || l.t.id === f.against) && l.cur === cur);
+  if (!pend.length) return '';
+  return `<div class="field"><div class="lbl">For which ${kind === 'given' ? 'loan' : 'borrowing'}?</div>
+    <div class="list">
+      <button class="radio-row ${!f.against ? 'on' : ''}" data-a="fset" data-k="against" data-v=""><i></i><div><b>Oldest pending first</b><span>Kanakku settles the oldest one automatically</span></div></button>
+      ${pend.slice().reverse().map(l => `<button class="radio-row ${f.against === l.t.id ? 'on' : ''}" data-a="fset" data-k="against" data-v="${l.t.id}"><i></i><div class="grow"><b>${money(l.amt, l.cur)} on ${fmtDate(l.t.date, true)}</b><span>${l.t.note ? esc(l.t.note.split('\n')[0]) + ' · ' : ''}${money(l.pending, l.cur)} pending</span></div></button>`).join('')}
+    </div></div>`;
+}
+
+function statementData(pid) {
+  const p = personOf(pid);
+  const e = peopleBalances().get(pid) || zero();
+  const books = personLoans(pid);
+  return { p, e, v: personAED(e), pendG: books.given.filter(l => l.pending > 0.004), pendB: books.borrowed.filter(l => l.pending > 0.004) };
+}
+
+function statementText(pid) {
+  const { p, e, v, pendG, pendB } = statementData(pid);
+  const L = [`*Kanakku – statement for ${p.name}*`, `Date: ${fmtDate(todayISO(), true)}`, ''];
+  if (pendG.length) {
+    L.push('Pending amounts you have to give me:');
+    for (const l of pendG) L.push(`• ${fmtDate(l.t.date, true)}${l.t.note ? ' (' + l.t.note.split('\n')[0] + ')' : ''}: ${money(l.amt, l.cur)}${l.back ? `, paid ${money(l.back, l.cur)}` : ''}${l.waived ? `, discount ${money(l.waived, l.cur)}` : ''} → *${money(l.pending, l.cur)}*`);
+    L.push('');
+  }
+  if (pendB.length) {
+    L.push('Amounts I have to give you:');
+    for (const l of pendB) L.push(`• ${fmtDate(l.t.date, true)}: ${money(l.amt, l.cur)} → ${money(l.pending, l.cur)} pending`);
+    L.push('');
+  }
+  L.push(v > 0.5 ? `*Total pending: ${multi(e, { abs: true, sep: ' + ' })}*` : v < -0.5 ? `*I owe you: ${multi(e, { abs: true, sep: ' + ' })}*` : 'All settled 👍 Thank you!');
+  return L.join('\n');
+}
+
+async function statementImage(pid) {
+  const { p, e, v, pendG, pendB } = statementData(pid);
+  const W = 1080, pad = 64;
+  const rows = [...pendG.map(l => ({ l, k: 'given' })), ...pendB.map(l => ({ l, k: 'borrowed' }))];
+  const H = 520 + rows.length * 132 + 220;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const font = (w, s) => `${w} ${s}px Manrope, system-ui, sans-serif`;
+  await document.fonts?.ready;
+  g.fillStyle = '#F6F4EF'; g.fillRect(0, 0, W, H);
+  // header band
+  const grad = g.createLinearGradient(0, 0, 0, 380); grad.addColorStop(0, '#18705C'); grad.addColorStop(1, '#094035');
+  g.fillStyle = grad; g.fillRect(0, 0, W, 380);
+  const logo = new Image(); logo.src = 'icon-512.png';
+  await new Promise(r => { logo.onload = r; logo.onerror = r; });
+  try { g.drawImage(logo, pad, 56, 96, 96); } catch {}
+  g.fillStyle = '#FFFFFF'; g.font = font(800, 44); g.fillText('Kanakku', pad + 120, 100);
+  g.font = font(600, 28); g.globalAlpha = .8; g.fillText(`Statement · ${fmtDate(todayISO(), true)}`, pad + 120, 142); g.globalAlpha = 1;
+  g.font = font(700, 34); g.globalAlpha = .85; g.fillText(v > 0.5 ? `${p.name}, pending to give` : v < -0.5 ? `I have to give ${p.name}` : `${p.name}`, pad, 236); g.globalAlpha = 1;
+  g.font = font(800, 72); g.fillText(isZero(e) ? 'All settled' : multi(e, { abs: true, sep: ' + ' }), pad, 320);
+  // rows
+  let y = 450;
+  g.fillStyle = '#56605B'; g.font = font(800, 24); g.fillText('DATE · DETAILS', pad, y); g.textAlign = 'right'; g.fillText('PENDING', W - pad, y); g.textAlign = 'left';
+  y += 30;
+  for (const { l, k } of rows) {
+    g.fillStyle = '#FFFFFF'; roundRect(g, pad - 16, y, W - 2 * pad + 32, 112, 22); g.fill();
+    g.fillStyle = '#1B2420'; g.font = font(800, 32);
+    g.fillText(`${k === 'given' ? 'Given' : 'Borrowed'} ${money(l.amt, l.cur)} · ${fmtDate(l.t.date, true)}`, pad + 8, y + 48);
+    g.fillStyle = '#8A928D'; g.font = font(600, 25);
+    const sub = [l.t.note?.split('\n')[0], l.back ? `paid ${money(l.back, l.cur)}` : '', l.waived ? `discount ${money(l.waived, l.cur)}` : ''].filter(Boolean).join(' · ');
+    g.fillText(sub.length > 52 ? sub.slice(0, 50) + '…' : sub, pad + 8, y + 88);
+    g.textAlign = 'right'; g.fillStyle = k === 'given' ? '#7A5AC8' : '#C2742A'; g.font = font(800, 34); g.fillText(money(l.pending, l.cur), W - pad - 8, y + 66); g.textAlign = 'left';
+    y += 132;
+  }
+  g.fillStyle = '#8A928D'; g.font = font(600, 24);
+  g.fillText('Sent from Kanakku', pad, H - 70);
+  return c.toDataURL('image/png').split(',')[1];
+}
+
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+async function shareStatement(id, asImage) {
+  const p = personOf(id);
+  closeSheet();
+  if (asImage) {
+    const data = await statementImage(id);
+    const name = `Kanakku-${p.name.replace(/\W+/g, '-')}-${todayISO()}.png`;
+    if (isNative()) { const r = window.KanakkuNative.shareFile(name, data, 'image/png'); if (r.startsWith('ERR:')) toast('Could not share'); return; }
+    const bytes = Uint8Array.from(atob(data), ch => ch.charCodeAt(0));
+    const file = new File([bytes], name, { type: 'image/png' });
+    if (navigator.canShare?.({ files: [file] })) return navigator.share({ files: [file] }).catch(() => {});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click();
+    return;
+  }
+  const text = statementText(id);
+  if (isNative() && window.KanakkuNative.shareText) return window.KanakkuNative.shareText(text);
+  if (navigator.share) return navigator.share({ text }).catch(() => {});
+  navigator.clipboard?.writeText(text).then(() => toast('Copied – paste it in WhatsApp'), () => toast('Could not copy'));
+}
+
 // ======================================================================
 // Files: backup / restore / import / export
 // ======================================================================
@@ -1425,19 +1568,14 @@ function exportCsv() {
 
 function sharePerson(id) {
   const p = personOf(id);
-  const e = peopleBalances().get(id) || {};
-  const list = sorted(personLedger(id)).reverse();
-  const lines = [`${p.name} – statement from Kanakku`, ''];
-  for (const t of list) { const s = side(t); lines.push(`${t.date}  ${TYPES[t.type].label.padEnd(9)} ${money(s.amt, s.cur)}${t.note ? '  (' + t.note.split('\n')[0] + ')' : ''}`); }
-  lines.push('');
-  const parts = [];
-  if (Math.abs(e.AED || 0) > 0.004) parts.push(money(Math.abs(e.AED), 'AED'));
-  if (Math.abs(e.INR || 0) > 0.004) parts.push(money(Math.abs(e.INR), 'INR'));
-  const v = personAED(e);
-  lines.push(v > 0.5 ? `Balance due to me: ${parts.join(' + ')}` : v < -0.5 ? `I owe: ${parts.join(' + ')}` : 'All settled 👍');
-  const text = lines.join('\n');
-  if (navigator.share) navigator.share({ text }).catch(() => {});
-  else navigator.clipboard?.writeText(text).then(() => toast('Statement copied – paste it in WhatsApp'), () => toast('Could not copy'));
+  openSheet({
+    title: `Send to ${p.name}`,
+    render: () => `<div class="list">
+      <button class="row tap" data-a="shareImg" data-id="${id}"><div class="ic bg-in">🖼️</div><div class="mid"><div class="t">As a picture</div><div class="d">A neat statement card for WhatsApp</div></div>${icon('chevron', 'chev')}</button>
+      <button class="row tap" data-a="shareTxt" data-id="${id}"><div class="ic">💬</div><div class="mid"><div class="t">As a message</div><div class="d">Plain text with each pending amount</div></div>${icon('chevron', 'chev')}</button>
+    </div>
+    <div class="card" style="margin-top:12px;white-space:pre-wrap;font-size:13px">${esc(statementText(id)).replace(/\*/g, '')}</div>`,
+  });
 }
 
 // ======================================================================
@@ -1511,6 +1649,9 @@ const actions = {
     if (d.kuri) init.kuri = d.kuri;
     if (d.asset) init.asset = d.asset;
     if (d.project) init.project = d.project;
+    if (d.against) init.against = d.against;
+    if (d.person && !d.acc && ['waive', 'waived'].includes(d.type)) init.acc = null;
+    if (d.person && d.against) { const l = [...personLoans(d.person).given, ...personLoans(d.person).borrowed].find(x => x.t.id === d.against); if (l) { if (l.t.acc && acc(l.t.acc)?.cur === l.cur && !['waive', 'waived'].includes(d.type)) init.acc = l.t.acc; else if (!['waive', 'waived'].includes(d.type)) init.acc = defaultAccountFor(l.cur); else init.cur = l.cur; if (d.type !== 'waive' && d.type !== 'waived') init.amt = l.pending; } }
     if (d.type === 'transfer' && d.acc) init.to = D().accounts.find(a => a.id !== d.acc && !a.closed)?.id;
     txnForm(init);
   },
@@ -1532,6 +1673,11 @@ const actions = {
     if (d.k === 'sub' && f.sub === v) { f.sub = ''; refreshSheet(); return; }
     f[d.k] = v;
     if (d.k === 'type' && (v === 'expense' || v === 'income')) f.cat = null;
+    if (d.k === 'type' && v === 'lend' || d.k === 'type' && v === 'borrow') f.against = null;
+    if (d.k === 'against' && v && f.person) {
+      const l = [...personLoans(f.person).given, ...personLoans(f.person).borrowed].find(x => x.t.id === v);
+      if (l && (!f.amtStr || f._autoAmt)) { f.amtStr = String(l.pending); f._autoAmt = true; }
+    }
     refreshSheet();
   },
   ftoggleRepeat: () => { const f = topSheet().f; f.repeat = !f.repeat; refreshSheet(); },
@@ -1564,6 +1710,10 @@ const actions = {
   setValue: (d) => setValue(d.id),
   newPerson: () => formSheet({ title: 'New person', values: {}, fields: [{ key: 'name', label: 'Name' }, { key: 'phone', label: 'Phone (optional)' }], onSave: (v) => { if (!v.name?.trim()) return 'Enter a name'; D().people.push({ id: newId('p'), name: v.name.trim(), phone: v.phone?.trim() || undefined }); } }),
   sharePerson: (d) => sharePerson(d.id),
+  shareImg: (d) => shareStatement(d.id, true),
+  shareTxt: (d) => shareStatement(d.id, false),
+  toggleLoan: (d) => { ui.openLoan = ui.openLoan === d.id ? null : d.id; render(); },
+  personAll: (d) => { ui.personAll = ui.personAll === d.id ? null : d.id; render(); },
   doRec: (d) => {
     const r = D().recurring.find(x => x.id === d.id);
     txnForm({ type: r.type, amt: r.amt, acc: r.acc, to: r.to, cat: r.cat, sub: r.sub, amt2: r.amt2, note: r.note, date: r.next > todayISO() ? todayISO() : r.next, fromRec: r.id });

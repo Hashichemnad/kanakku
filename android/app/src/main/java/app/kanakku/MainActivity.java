@@ -374,6 +374,14 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void shareText(String text) {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_TEXT, text);
+            runOnUiThread(() -> startActivity(Intent.createChooser(send, "Send statement")));
+        }
+
+        @JavascriptInterface
         public boolean bioAvailable() {
             return biometricReady();
         }

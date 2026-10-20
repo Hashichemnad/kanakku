@@ -108,6 +108,8 @@ export const TYPES = {
   invest:        { label: 'Invested',          dir: -1, color: 'invest' },
   asset_in:      { label: 'Investment return', dir: 1,  color: 'invest' },
   adjust:        { label: 'Balance correction', dir: 1, color: 'move' },
+  waive:         { label: 'Discount given',    dir: 0,  color: 'lend' },
+  waived:        { label: 'Discount received', dir: 0,  color: 'borrow' },
   person_adjust: { label: 'Correction',       dir: 0,  color: 'lend' },
 };
 
@@ -153,10 +155,56 @@ export function accountBalances(upto) {
 /** Ledger side of a txn for people/kuri/assets: { amt, cur } */
 export const side = (t) => ({ amt: t.amt2 ?? t.amt, cur: t.cur2 || t.cur });
 
+export const PERSON_TYPES = ['lend', 'collect', 'waive', 'borrow', 'repay', 'waived', 'person_adjust'];
 export function personLedger(pid) {
-  return store.data.txns.filter(t => t.person === pid && ['lend', 'collect', 'borrow', 'repay', 'person_adjust'].includes(t.type));
+  return store.data.txns.filter(t => t.person === pid && PERSON_TYPES.includes(t.type));
 }
-const PSIGN = { lend: 1, repay: 1, collect: -1, borrow: -1, person_adjust: 1 };
+// waive: you let go of part of what they owe you. waived: they let go of part of what you owe them.
+export const PSIGN = { lend: 1, repay: 1, collect: -1, borrow: -1, waive: -1, waived: 1, person_adjust: 1 };
+
+/**
+ * Links every repayment / discount to the loan it settles.
+ * Entries with t.against go to that loan; the rest settle the oldest pending loan first.
+ * Returns { given: [...], borrowed: [...] } where each loan is
+ * { t, cur, amt, back, waived, pending, settles: [{t, amt}] , closedOn }.
+ */
+export function personLoans(pid) {
+  const list = personLedger(pid).slice().sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.created || 0) - (b.created || 0));
+  const books = { given: [], borrowed: [] };
+  const mk = (t, amt, cur) => ({ t, cur, amt, back: 0, waived: 0, pending: amt, settles: [], closedOn: null });
+  const credits = { given: [], borrowed: [] };
+  for (const t of list) {
+    const { amt, cur } = side(t);
+    if (t.type === 'lend') books.given.push(mk(t, amt, cur));
+    else if (t.type === 'borrow') books.borrowed.push(mk(t, amt, cur));
+    else if (t.type === 'collect' || t.type === 'waive') credits.given.push({ t, amt, cur });
+    else if (t.type === 'repay' || t.type === 'waived') credits.borrowed.push({ t, amt, cur });
+    else if (t.type === 'person_adjust') {
+      if (amt > 0) books.given.push({ ...mk(t, amt, cur), opening: true });
+      else if (amt < 0) credits.given.push({ t, amt: -amt, cur, adj: true });
+    }
+  }
+  for (const side_ of ['given', 'borrowed']) {
+    const loans = books[side_];
+    const apply = (loan, c, amt) => {
+      const a = Math.min(amt, loan.pending);
+      if (a <= 0) return 0;
+      loan.pending = r2(loan.pending - a);
+      if (c.t.type === 'waive' || c.t.type === 'waived') loan.waived = r2(loan.waived + a); else loan.back = r2(loan.back + a);
+      loan.settles.push({ t: c.t, amt: r2(a) });
+      if (loan.pending <= 0.004) loan.closedOn = c.t.date;
+      return a;
+    };
+    for (const c of credits[side_]) {
+      let left = c.amt;
+      if (c.t.against) { const l = loans.find(x => x.t.id === c.t.against && x.cur === c.cur); if (l) left -= apply(l, c, left); }
+      for (const l of loans) { if (left <= 0.004) break; if (l.cur === c.cur && l.pending > 0.004) left -= apply(l, c, left); }
+      c.extra = r2(left); // paid more than all loans (kept as credit)
+    }
+    books[side_ + 'Extra'] = credits[side_].filter(c => c.extra > 0.004);
+  }
+  return books;
+}
 /** Map personId -> {AED, INR}. Positive = they owe you. */
 export function peopleBalances(upto) {
   const m = new Map();

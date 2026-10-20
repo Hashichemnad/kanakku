@@ -361,3 +361,13 @@ textarea.input { resize: none; min-height: 64px; }
 .radio-row span { font-size: 12.5px; color: var(--ink-3); }
 
 .hero .split div div { background: none; padding: 0; border-radius: 0; }
+
+.seg.wrap { flex-wrap: wrap; }
+.seg.wrap button { flex: 1 1 30%; }
+.loan { background: var(--surface); border-radius: 16px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 10px; }
+.loan.done { opacity: .78; }
+.loan-top { display: flex; gap: 10px; width: 100%; text-align: left; align-items: flex-start; }
+.loan-top .t { font-weight: 800; }
+.loan-top .d, .loan .d { font-size: 12.5px; color: var(--ink-3); margin-top: 1px; }
+.loan-detail { margin-top: 8px; border-top: 1px solid var(--line); }
+.loan-detail .btn { height: 42px; font-size: 13.5px; padding: 0 10px; }
